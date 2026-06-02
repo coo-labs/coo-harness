@@ -283,7 +283,8 @@
       "Bash(jq '.permissions.allow |= map\\(select\\(\\(. | contains\\(\"vade-canvas\"\\) | not\\) and \\(. | contains\\(\"canvas-\"\\) | not\\)\\)\\)' .claude/settings.json)",
       "Bash(mv .claude/settings.json.tmp .claude/settings.json)",
       "Bash(echo \"=== count Mac-local path refs in settings.json ===\" && grep -c \"GitHub/coo-labs/vade-\\\\|/coo-harness/\\\\|/coo-memory/\\\\|/coo-logs/\\\\|/vade-canvas/\" .claude/settings.json && echo \"\" && echo \"=== apply bulk replacement ===\" && sed -i \\\\ *)",
-      "Bash(sed -i \\\\ *)"
+      "Bash(sed -i \\\\ *)",
+      "Bash(VADE_BRAKE_ENFORCE=block-on-FAIL VADE_CLOUD_STATE_DIR=/tmp/brake-test-2 VADE_COO_MEMORY_DIR=/home/user/coo-memory HOME=/tmp/brake-test-home2 bash /home/user/coo-harness/scripts/hooks/boot-brake-guard.sh)"
     ],
     "additionalDirectories": [
       "/tmp"
@@ -331,8 +332,14 @@
     ]
   },
   "deniedMcpServers": [
-    { "serverName": "2512c95b-4f21-45f0-9cfe-4bbb781d5d96" },
-    { "serverName": "67828e51-7e81-47d2-af54-52c28c902662" },
-    { "serverName": "90cea781-9b8c-43e1-9536-8a68c9936159" }
+    {
+      "serverName": "2512c95b-4f21-45f0-9cfe-4bbb781d5d96"
+    },
+    {
+      "serverName": "67828e51-7e81-47d2-af54-52c28c902662"
+    },
+    {
+      "serverName": "90cea781-9b8c-43e1-9536-8a68c9936159"
+    }
   ]
 }
