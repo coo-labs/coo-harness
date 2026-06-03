@@ -12,6 +12,10 @@
         "hooks": [
           {
             "type": "command",
+            "command": "bash \"$VADE_RUNTIME_DIR/scripts/boot/boot-brake-clear.sh\""
+          },
+          {
+            "type": "command",
             "command": "bash \"$VADE_RUNTIME_DIR/scripts/boot/session-start-sync.sh\""
           },
           {
@@ -72,6 +76,15 @@
       }
     ],
     "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$VADE_RUNTIME_DIR/scripts/hooks/boot-brake-guard.sh\""
+          }
+        ]
+      },
       {
         "matcher": "Bash",
         "hooks": [
@@ -145,7 +158,8 @@
     "CLAUDE_STREAM_IDLE_TIMEOUT_MS": "600000",
     "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
     "CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS": "1",
-    "ENABLE_CLAUDEAI_MCP_SERVERS": "false"
+    "ENABLE_CLAUDEAI_MCP_SERVERS": "false",
+    "VADE_BRAKE_ENFORCE": "warn"
   },
   "skillOverrides": {
     "agentmail": "user-invocable-only"
@@ -283,7 +297,14 @@
       "Bash(jq '.permissions.allow |= map\\(select\\(\\(. | contains\\(\"vade-canvas\"\\) | not\\) and \\(. | contains\\(\"canvas-\"\\) | not\\)\\)\\)' .claude/settings.json)",
       "Bash(mv .claude/settings.json.tmp .claude/settings.json)",
       "Bash(echo \"=== count Mac-local path refs in settings.json ===\" && grep -c \"GitHub/coo-labs/vade-\\\\|/coo-harness/\\\\|/coo-memory/\\\\|/coo-logs/\\\\|/vade-canvas/\" .claude/settings.json && echo \"\" && echo \"=== apply bulk replacement ===\" && sed -i \\\\ *)",
-      "Bash(sed -i \\\\ *)"
+      "Bash(sed -i \\\\ *)",
+      "Bash(VADE_BRAKE_ENFORCE=block-on-FAIL VADE_CLOUD_STATE_DIR=/tmp/brake-test-2 VADE_COO_MEMORY_DIR=/home/user/coo-memory HOME=/tmp/brake-test-home2 bash /home/user/coo-harness/scripts/hooks/boot-brake-guard.sh)",
+      "Bash(HOME=/tmp/integ-home bash /home/user/coo-memory/.claude/skills/unbrake/scripts/unbrake.sh \"integ-session\" \"integration test of full override path\")",
+      "Bash(VADE_BRAKE_ENFORCE=block-on-FAIL VADE_CLOUD_STATE_DIR=/tmp/integ-state VADE_COO_MEMORY_DIR=/home/user/coo-memory HOME=/tmp/integ-home bash /home/user/coo-harness/scripts/hooks/boot-brake-guard.sh)",
+      "Bash(mkdir -p /tmp/integ-state /tmp/integ-home/.vade /tmp/integ-home/.claude)",
+      "Bash(HOME=/tmp/integ2-home bash /home/user/coo-memory/.claude/skills/unbrake/scripts/unbrake.sh \"integ2-session\" \"verifying full override path with new HMAC scope\")",
+      "Bash(VADE_BRAKE_ENFORCE=block-on-FAIL VADE_BRAKE_RACE_GRACE_SECONDS=0 VADE_CLOUD_STATE_DIR=/tmp/integ2-state VADE_COO_MEMORY_DIR=/home/user/coo-memory HOME=/tmp/integ2-home bash /home/user/coo-harness/scripts/hooks/boot-brake-guard.sh)",
+      "Bash(mkdir -p /tmp/integ2-state /tmp/integ2-home/.vade /tmp/integ2-home/.claude)"
     ],
     "additionalDirectories": [
       "/tmp"
@@ -331,8 +352,14 @@
     ]
   },
   "deniedMcpServers": [
-    { "serverName": "2512c95b-4f21-45f0-9cfe-4bbb781d5d96" },
-    { "serverName": "67828e51-7e81-47d2-af54-52c28c902662" },
-    { "serverName": "90cea781-9b8c-43e1-9536-8a68c9936159" }
+    {
+      "serverName": "2512c95b-4f21-45f0-9cfe-4bbb781d5d96"
+    },
+    {
+      "serverName": "67828e51-7e81-47d2-af54-52c28c902662"
+    },
+    {
+      "serverName": "90cea781-9b8c-43e1-9536-8a68c9936159"
+    }
   ]
 }
