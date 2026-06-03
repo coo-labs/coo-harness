@@ -85,8 +85,17 @@ def derive_hmac_key():
     return hashlib.sha256(src.encode("utf-8")).digest()
 
 
-def compute_hmac(granted_at, session_id, reason):
-    msg = f"{granted_at}|{session_id}|{reason}".encode("utf-8")
+def compute_hmac(granted_at, expires_at, session_id, reason):
+    """HMAC over length-prefixed canonical form.
+
+    Length-prefixing closes the delimiter-injection attack: a `reason`
+    containing `|` cannot produce a colliding MAC by reshuffling fields
+    (security-review SC3). `expires_at` is included in the MAC scope so
+    a captured override cannot have its TTL extended (security-review
+    SC1). Field order is fixed; the unbrake.sh writer must match.
+    """
+    parts = (str(granted_at), str(expires_at), str(session_id), str(reason))
+    msg = "|".join(f"{len(p)}:{p}" for p in parts).encode("utf-8")
     return hmac.new(derive_hmac_key(), msg, hashlib.sha256).hexdigest()
 
 
@@ -157,6 +166,63 @@ def write_fault(state_dir, message, exc=None):
         return None
 
 
+# SessionStart producers tracked by the race-gate (Sys-Eng C3). When
+# the first PreToolUse fires while these are still running, the brake
+# stays PENDING rather than emit phantom FAILs that pollute the 7-day
+# soak signal. The list mirrors the SessionStart `startup` matcher in
+# .claude/settings.json; new producers should be added here in the
+# same PR that registers them.
+PRODUCERS_TO_TRACK = (
+    "session-start-sync",
+    "coo-bootstrap",
+    "memo-index",
+    "coo-identity-digest",
+)
+
+# Wall-clock grace window when boot.log is unavailable (Sys-Eng C3
+# fallback). The v2 design wanted producer end-markers as the primary
+# mechanism; this is the documented degradation path.
+# Overridable via VADE_BRAKE_RACE_GRACE_SECONDS (CI tests set it to 0
+# to bypass the race window; production should leave it at the default).
+def _race_grace_seconds():
+    raw = os.environ.get("VADE_BRAKE_RACE_GRACE_SECONDS", "")
+    if not raw:
+        return 30.0
+    try:
+        return float(raw)
+    except ValueError:
+        return 30.0
+
+
+def boot_producers_complete(home, session_id):
+    """Returns (all_complete, missing_producers).
+
+    Reads $HOME/.vade/boot.log (newline-delimited JSON) for end-phase
+    entries scoped to this session_id. Each declared SessionStart
+    producer must have logged `phase=end`. If boot.log is missing or
+    unreadable, returns (None, []) to signal "fall back to wall-clock".
+    """
+    log = Path(home) / ".vade" / "boot.log"
+    if not log.exists():
+        return None, []
+    completed = set()
+    try:
+        with open(log) as fh:
+            for line in fh:
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                if rec.get("session") != session_id:
+                    continue
+                if rec.get("phase") == "end" and rec.get("script"):
+                    completed.add(rec["script"])
+    except OSError:
+        return None, []
+    missing = [p for p in PRODUCERS_TO_TRACK if p not in completed]
+    return (len(missing) == 0), missing
+
+
 def load_yaml_manifest(manifest_path):
     try:
         import yaml
@@ -198,25 +264,32 @@ def sha1_file(path):
 
 
 def check_deliverable(entry, env, home, session_id, cwd):
-    """Returns (ok: bool, reason: str, content_hash: str|None)."""
+    """Returns (ok: bool, reason: str, content_hash: str|None, signals: list).
+
+    `signals` is a list of diagnostic events that should land in
+    brake-events.jsonl. Most check_kinds return []. The read_observed
+    branch returns a signal when its predicate glob is configured but
+    matches zero non-trivial files (SRE F5) — that's the symptom of a
+    drifted path convention silently disabling the §11 invariant.
+    """
     kind = entry.get("check_kind", "exists")
     path = resolve_path(entry, env)
 
     if kind == "exists":
         if Path(path).exists():
-            return True, "", sha1_file(path)
-        return False, f"missing: {path}", None
+            return True, "", sha1_file(path), []
+        return False, f"missing: {path}", None, []
 
     if kind == "parses_json":
         try:
             with open(path) as fh:
                 content = fh.read()
             json.loads(content)
-            return True, "", hashlib.sha1(content.encode()).hexdigest()
+            return True, "", hashlib.sha1(content.encode()).hexdigest(), []
         except FileNotFoundError:
-            return False, f"missing: {path}", None
+            return False, f"missing: {path}", None, []
         except Exception as e:
-            return False, f"unparseable: {type(e).__name__}", None
+            return False, f"unparseable: {type(e).__name__}", None, []
 
     if kind == "symlink_to":
         target = entry.get("check_arg", "")
@@ -224,14 +297,14 @@ def check_deliverable(entry, env, home, session_id, cwd):
             target = target.replace(f"${var}", env.get(var, ""))
         try:
             if not Path(path).is_symlink():
-                return False, f"not a symlink: {path}", None
+                return False, f"not a symlink: {path}", None, []
             resolved = os.path.realpath(path)
             expected = os.path.realpath(target) if target else None
             if expected and resolved != expected:
-                return False, f"symlink target drift: {path}", None
-            return True, "", hashlib.sha1(resolved.encode()).hexdigest()
+                return False, f"symlink target drift: {path}", None, []
+            return True, "", hashlib.sha1(resolved.encode()).hexdigest(), []
         except Exception as e:
-            return False, f"symlink check error: {type(e).__name__}", None
+            return False, f"symlink check error: {type(e).__name__}", None, []
 
     if kind == "has_jq_path":
         jq_path = entry.get("check_arg", "")
@@ -251,19 +324,21 @@ def check_deliverable(entry, env, home, session_id, cwd):
                         cur = cur[int(segment)]
                     else:
                         cur = cur[segment]
-            return True, "", hashlib.sha1(content.encode()).hexdigest()
+            return True, "", hashlib.sha1(content.encode()).hexdigest(), []
         except FileNotFoundError:
-            return False, f"missing: {path}", None
+            return False, f"missing: {path}", None, []
         except (KeyError, IndexError):
-            return False, f"jq path missing: {jq_path}", None
+            return False, f"jq path missing: {jq_path}", None, []
         except Exception as e:
-            return False, f"check error: {type(e).__name__}", None
+            return False, f"check error: {type(e).__name__}", None, []
 
     if kind == "read_observed":
         # The identity_consumed kind from v2 §11. The check_arg is a
         # regex pattern; the deliverable is satisfied when ANY Read tool
         # call observed in this session matches the pattern. Conditional:
-        # if the predicate file doesn't exist, skip (not required).
+        # if the predicate glob matches no non-trivial files, the digest
+        # didn't overflow and the check is no-op.
+        signals = []
         predicate_glob = entry.get("predicate_exists_glob", "")
         if predicate_glob:
             import glob
@@ -273,37 +348,61 @@ def check_deliverable(entry, env, home, session_id, cwd):
             # The cwd is part of the per-session project dir naming
             expanded_glob = expanded_glob.replace("$CWD_DASHIFIED", cwd.replace("/", "-"))
             expanded_glob = expanded_glob.replace("$SESSION_ID", session_id)
-            matches = glob.glob(expanded_glob)
+            try:
+                matches = glob.glob(expanded_glob)
+            except Exception:
+                matches = []
             # Filter to non-trivial files (> 1KB indicates real overflow)
-            substantive = [m for m in matches if Path(m).stat().st_size > 1024]
+            substantive = []
+            for m in matches:
+                try:
+                    if Path(m).stat().st_size > 1024:
+                        substantive.append(m)
+                except OSError:
+                    continue
             if not substantive:
-                return True, "predicate not present; check skipped", None
+                # Loud-fail on the surface that "no overflow detected"
+                # could mean either (a) digest fit inline (correct skip)
+                # OR (b) the path convention drifted and the §11
+                # invariant is now silently disabled. SRE F5: surface
+                # this as a diagnostic event so a Phase 1 aggregator
+                # can detect convention drift in the wild.
+                signals.append({
+                    "type": "predicate_unmatched",
+                    "deliverable": entry.get("id", "unknown"),
+                    "expanded_glob": sanitize(expanded_glob),
+                    "matches_total": len(matches),
+                })
+                return True, "predicate not present; check skipped", None, signals
         pattern = entry.get("check_arg", "")
         try:
             rx = re.compile(pattern)
         except re.error as e:
-            return False, f"bad regex: {type(e).__name__}", None
+            return False, f"bad regex: {type(e).__name__}", None, []
         if session_has_read(home, session_id, lambda fp: rx.search(fp) is not None):
-            return True, "", None
-        return False, f"identity layer overflowed but agent has not yet Read it", None
+            return True, "", None, []
+        return False, f"identity layer overflowed but agent has not yet Read it", None, []
 
-    return False, f"unknown check_kind: {kind}", None
+    return False, f"unknown check_kind: {kind}", None, []
 
 
 def validate_manifest(manifest, env, home, session_id, cwd):
-    """Returns (state, failures, content_hashes, manifest_version)."""
+    """Returns (state, failures, content_hashes, manifest_version, signals)."""
     if not manifest or "deliverables" not in manifest:
-        return "FAIL", [{"deliverable": "manifest", "reason": "no deliverables key"}], {}, 0
+        return "FAIL", [{"deliverable": "manifest", "reason": "no deliverables key"}], {}, 0, []
 
     manifest_version = manifest.get("manifest_version", 1)
     failures = []
     hashes = {}
+    signals = []
 
     for entry in manifest.get("deliverables", []):
         dlid = entry.get("id", "unknown")
-        ok, reason, ch = check_deliverable(entry, env, home, session_id, cwd)
+        ok, reason, ch, entry_signals = check_deliverable(entry, env, home, session_id, cwd)
         if ch is not None:
             hashes[dlid] = ch
+        if entry_signals:
+            signals.extend(entry_signals)
         if not ok:
             if entry.get("severity", "critical") == "critical":
                 failures.append({
@@ -313,7 +412,7 @@ def validate_manifest(manifest, env, home, session_id, cwd):
                 })
 
     state = "OK" if not failures else "FAIL"
-    return state, failures, hashes, manifest_version
+    return state, failures, hashes, manifest_version, signals
 
 
 def read_cached_sentinel(path):
@@ -329,7 +428,14 @@ def read_cached_sentinel(path):
 
 
 def check_override(home, session_id):
-    """Returns (allowed, info_dict|None)."""
+    """Returns (allowed, info_dict|None).
+
+    Rejects forged overrides per security review:
+      - Empty/missing expires_at → treated as already expired (SC2).
+      - expires_at is in the HMAC scope (SC1) so a captured override
+        cannot be tampered to extend its TTL.
+      - session_id mismatch → reject (does not propagate to sub-agents).
+    """
     path = Path(home) / ".vade" / f"boot-brake-override.{session_id}.json"
     if not path.exists():
         return False, None
@@ -339,18 +445,22 @@ def check_override(home, session_id):
     except Exception:
         return False, None
 
+    expires_at = ovr.get("expires_at", "")
+    if not expires_at:
+        return False, {"failure": "missing_expires_at"}
+    if expires_at < now_iso():
+        return False, {"failure": "expired", "expired_at": expires_at}
+    if ovr.get("session_id") != session_id:
+        return False, {"failure": "session_mismatch"}
+
     expected_hmac = compute_hmac(
         ovr.get("granted_at", ""),
+        expires_at,
         ovr.get("session_id", ""),
         ovr.get("reason", ""),
     )
     if not hmac.compare_digest(expected_hmac, ovr.get("hmac", "")):
         return False, {"failure": "hmac_mismatch"}
-    if ovr.get("session_id") != session_id:
-        return False, {"failure": "session_mismatch"}
-    expires_at = ovr.get("expires_at", "")
-    if expires_at and expires_at < now_iso():
-        return False, {"failure": "expired", "expired_at": expires_at}
 
     return True, {"reason": ovr.get("reason", ""), "expires_at": expires_at}
 
@@ -445,36 +555,61 @@ def main():
 
     manifest_path = Path(env.get("VADE_COO_MEMORY_DIR", "/home/user/coo-memory")) / "operations" / "boot-deliverables.yml"
 
+    # Initial revalidation triggers:
+    #   - no sentinel at all (fresh session / first PreToolUse)
+    #   - sentinel exists but is UNPARSEABLE
+    #   - sentinel is PENDING with epoch=0 (clear-hook initial; never validated)
     needs_revalidation = (
         sentinel is None
         or sentinel.get("state") == "UNPARSEABLE"
+        or (sentinel.get("state") == "PENDING"
+            and sentinel.get("checked_at_epoch", 0) == 0)
     )
 
     # Backpressure cap: don't re-validate more than once per second.
     backpressure_floor = 1.0
     now_epoch = time.time()
+    manifest_loaded = None  # cache across cached-check + revalidate branches
+    m_err_cached = None
     if sentinel and not needs_revalidation:
         last = sentinel.get("checked_at_epoch", 0)
         if now_epoch - last < backpressure_floor:
             pass  # honor the cache
         else:
             # Content-hash drift check
-            manifest, m_err = load_yaml_manifest(manifest_path)
-            if manifest and not m_err:
-                m_version = manifest.get("manifest_version", 1)
+            manifest_loaded, m_err_cached = load_yaml_manifest(manifest_path)
+            if m_err_cached:
+                # Treat manifest unreadable as a self-fault and force
+                # revalidation (which will write FAIL + cause=validator_self_fault).
+                # Sys-Eng C2: a previously-OK sentinel must not survive
+                # pyyaml going missing or the manifest becoming unreadable.
+                needs_revalidation = True
+            elif manifest_loaded:
+                m_version = manifest_loaded.get("manifest_version", 1)
                 if sentinel.get("manifest_version", 0) != m_version:
                     needs_revalidation = True
                 else:
                     # Cheap mtime first-pass, then hash if changed
-                    for entry in manifest.get("deliverables", []):
+                    for entry in manifest_loaded.get("deliverables", []):
                         path = resolve_path(entry, env)
+                        prev_hash = sentinel.get("content_hashes", {}).get(entry.get("id", ""))
+                        # If we previously hashed this deliverable but
+                        # it no longer exists / can't be stat'd, the
+                        # cache is stale — re-validate. Sys-Eng C1: a
+                        # cached OK must not survive deletion of a
+                        # previously-OK deliverable.
                         if not Path(path).exists():
+                            if prev_hash is not None:
+                                needs_revalidation = True
+                                break
                             continue
                         try:
-                            mtime = Path(path).stat().st_mtime
+                            Path(path).stat()
                         except OSError:
+                            if prev_hash is not None:
+                                needs_revalidation = True
+                                break
                             continue
-                        prev_hash = sentinel.get("content_hashes", {}).get(entry.get("id", ""))
                         if prev_hash:
                             cur_hash = sha1_file(path)
                             if cur_hash != prev_hash:
@@ -486,7 +621,12 @@ def main():
         needs_revalidation = True
 
     if needs_revalidation:
-        manifest, m_err = load_yaml_manifest(manifest_path)
+        # Reuse the cached manifest read if we already did one in the
+        # cached-check branch (Sys-Eng M4: closes the TOCTOU window).
+        if manifest_loaded is not None or m_err_cached is not None:
+            manifest, m_err = manifest_loaded, m_err_cached
+        else:
+            manifest, m_err = load_yaml_manifest(manifest_path)
         if m_err:
             # Validator self-fault — record but DO NOT brick the agent in
             # Phase 0. The brake's own infrastructure failing should not
@@ -516,38 +656,105 @@ def main():
                 "fault_log": fault_path,
             })
         else:
-            state, failures, hashes, m_version = validate_manifest(
-                manifest, env, home, session_id, cwd
-            )
+            # Race gate (Sys-Eng C3, v2 §6 producer-completion check):
+            # if SessionStart producers haven't all logged phase=end,
+            # the deliverables they produce may legitimately not exist
+            # yet. Stay PENDING rather than record a phantom FAIL that
+            # corrupts the 7-day soak signal gating the warn→block flip.
+            boot_started_at_str = (sentinel or {}).get("boot_started_at", now_iso())
+            try:
+                boot_started_epoch = time.mktime(time.strptime(
+                    boot_started_at_str, "%Y-%m-%dT%H:%M:%SZ"
+                )) - time.timezone
+            except (ValueError, OverflowError):
+                boot_started_epoch = now_epoch
+            elapsed = now_epoch - boot_started_epoch
+
+            grace_seconds = _race_grace_seconds()
+            all_done, missing_producers = boot_producers_complete(home, session_id)
+            if grace_seconds <= 0:
+                in_race_window = False
+                race_reason = "race-gate disabled"
+            elif all_done is None:
+                # boot.log unreadable — fall back to wall-clock grace
+                in_race_window = elapsed < grace_seconds
+                race_reason = "wall-clock grace"
+            else:
+                in_race_window = (not all_done)
+                race_reason = "producer end-markers pending"
+
             prev_state = (sentinel or {}).get("state", "PENDING")
-            sentinel = {
-                "state": state,
-                "checked_at": now_iso(),
-                "checked_at_epoch": now_epoch,
-                "manifest_version": m_version,
-                "failures": failures,
-                "boot_started_at": (sentinel or {}).get("boot_started_at", now_iso()),
-                "content_hashes": hashes,
-            }
-            atomic_write_json(sentinel_path, sentinel)
-            if prev_state != state and failures:
-                append_event(state_dir, {
-                    "ts": now_iso(),
-                    "session_id": session_id,
-                    "tool": tool_name,
-                    "from": prev_state,
-                    "to": state,
-                    "cause": "deliverable_missing",
-                    "deliverables": [f["deliverable"] for f in failures],
-                })
-            elif prev_state != state:
-                append_event(state_dir, {
-                    "ts": now_iso(),
-                    "session_id": session_id,
-                    "tool": tool_name,
-                    "from": prev_state,
-                    "to": state,
-                })
+            if in_race_window:
+                # Stay PENDING; do not record FAIL during the race window.
+                sentinel = {
+                    "state": "PENDING",
+                    "checked_at": now_iso(),
+                    "checked_at_epoch": now_epoch,
+                    "manifest_version": manifest.get("manifest_version", 1),
+                    "failures": [],
+                    "boot_started_at": boot_started_at_str,
+                    "content_hashes": (sentinel or {}).get("content_hashes", {}),
+                    "race_gate": {
+                        "reason": race_reason,
+                        "missing_producers": missing_producers,
+                        "elapsed_seconds": round(elapsed, 2),
+                    },
+                }
+                atomic_write_json(sentinel_path, sentinel)
+                if prev_state != "PENDING":
+                    append_event(state_dir, {
+                        "ts": now_iso(),
+                        "session_id": session_id,
+                        "tool": tool_name,
+                        "from": prev_state,
+                        "to": "PENDING",
+                        "cause": "race_gate_engaged",
+                        "race_reason": race_reason,
+                        "missing_producers": missing_producers,
+                    })
+            else:
+                state, failures, hashes, m_version, signals = validate_manifest(
+                    manifest, env, home, session_id, cwd
+                )
+                for sig in signals:
+                    if sig.get("type") == "predicate_unmatched":
+                        append_event(state_dir, {
+                            "ts": now_iso(),
+                            "session_id": session_id,
+                            "tool": tool_name,
+                            "cause": "identity_predicate_unmatched",
+                            "deliverable": sig.get("deliverable"),
+                            "expanded_glob": sig.get("expanded_glob"),
+                            "matches_total": sig.get("matches_total"),
+                        })
+                sentinel = {
+                    "state": state,
+                    "checked_at": now_iso(),
+                    "checked_at_epoch": now_epoch,
+                    "manifest_version": m_version,
+                    "failures": failures,
+                    "boot_started_at": boot_started_at_str,
+                    "content_hashes": hashes,
+                }
+                atomic_write_json(sentinel_path, sentinel)
+                if prev_state != state and failures:
+                    append_event(state_dir, {
+                        "ts": now_iso(),
+                        "session_id": session_id,
+                        "tool": tool_name,
+                        "from": prev_state,
+                        "to": state,
+                        "cause": "deliverable_missing",
+                        "deliverables": [f["deliverable"] for f in failures],
+                    })
+                elif prev_state != state:
+                    append_event(state_dir, {
+                        "ts": now_iso(),
+                        "session_id": session_id,
+                        "tool": tool_name,
+                        "from": prev_state,
+                        "to": state,
+                    })
 
     state = (sentinel or {}).get("state", "PENDING")
 
@@ -568,8 +775,10 @@ def main():
         })
         sys.exit(0)
 
-    # block-on-FAIL / block-strict → check whitelist + deny if outside
-    if state == "PENDING" and mode == "block-on-FAIL":
+    # block-on-FAIL / block-strict → check whitelist + deny if outside.
+    # `mode` is lowercased on read (line 405), so the comparison
+    # constants must be lowercase too. block-strict denies PENDING.
+    if state == "PENDING" and mode == "block-on-fail":
         sys.exit(0)
 
     if tool_name in WHITELIST_TOOLS:

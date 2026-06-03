@@ -1,6 +1,9 @@
 # Fixture manifest for boot-brake CI tests. Mirrors the Phase 0 entries
 # in coo-memory/operations/boot-deliverables.yml; refreshed manually
-# when the canonical manifest gains new critical entries.
+# when the canonical manifest gains new entries.
+#
+# Includes `identity_consumed` so the §11 consumed-signal mechanism
+# has CI coverage (Sys-Eng M1).
 
 manifest_version: 1
 
@@ -11,7 +14,7 @@ deliverables:
     producer: coo-harness/scripts/boot/integrity-check.sh
     severity: critical
 
-  - id: coo_bootstrap_marker
+  - id: bootstrap_marker
     path: $HOME/.vade/.coo-bootstrap-done
     check_kind: exists
     producer: coo-harness/scripts/boot/coo-bootstrap.sh
@@ -21,4 +24,12 @@ deliverables:
     path: $HOME/.claude/settings.json
     check_kind: parses_json
     producer: coo-harness/scripts/boot/session-start-sync.sh
+    severity: critical
+
+  - id: identity_consumed
+    path: dynamic
+    check_kind: read_observed
+    check_arg: ".*/tool-results/hook-.*-stdout\\.txt$"
+    predicate_exists_glob: $HOME/.claude/projects/$CWD_DASHIFIED/$SESSION_ID/tool-results/hook-*-stdout.txt
+    producer: coo-harness/scripts/lifecycle/coo-identity-digest.sh
     severity: critical

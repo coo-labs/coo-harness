@@ -1,22 +1,31 @@
 #!/usr/bin/env bash
 # CI tests for boot-brake-guard.py + boot-brake-clear.sh.
 #
-# Covers v2 §7 tests 1, 2, 3, 6, 7, 9 from the boot-brake architecture
-# (coo-memory#1082); the rest are Phase 1+.
+# Covers v2 §7 tests 1, 2, 3, 6, 7, 9 (Phase 0 minimum), plus four
+# regression tests for the post-review patches:
 #
-#   1. Per-producer fault injection — for each manifest entry, run
-#      the guard with that deliverable missing; assert state=FAIL with
-#      the deliverable in failures.
-#   2. PreToolUse refusal smoke — in block-on-FAIL mode with FAIL state,
-#      attempt Bash → assert hookSpecificOutput.permissionDecision=deny
-#      with the failing deliverable in the reason.
-#   3. Whitelist allows diagnostics — same state, attempt Read and Grep
-#      → assert exit 0 with no deny output.
-#   6. Sub-agent isolation — verify Task tool stays denied in FAIL.
-#   7. Parallel-session isolation — two sessions sharing a state-dir
-#      get distinct per-session sentinels and don't cross-pollute.
-#   9. Unparseable sentinel — corrupt sentinel re-triggers validation
-#      and writes a fault diagnostic; does NOT lock the agent out.
+#   1.  Per-producer fault injection — each manifest entry, missing.
+#   2.  PreToolUse refusal smoke — block-on-FAIL + FAIL → deny.
+#   3.  Whitelist allows diagnostics — Read + Grep in FAIL state.
+#   6.  Sub-agent isolation — Task denied; override does not propagate
+#       to different session_id.
+#   7.  Parallel-session isolation — sentinels keyed per-session AND
+#       cache-invalidation: a cached OK does NOT survive deletion of
+#       a previously-OK deliverable (Sys-Eng C1 regression test).
+#   9.  Unparseable sentinel re-validates + writes fault diagnostic.
+#   11. (new) Manifest unreadable (pyyaml-fault simulated) → self-fault
+#       sentinel + cause=validator_self_fault event (Sys-Eng C2).
+#   12. (new) Race gate engaged — first PreToolUse while producers are
+#       still running stays PENDING; doesn't emit phantom FAIL
+#       (Sys-Eng C3).
+#   13. (new) identity_consumed predicate-unmatched emits
+#       cause=identity_predicate_unmatched event (SRE F5).
+#   14. (new) Override-sentinel tamper resistance — flipping expires_at
+#       in a captured override invalidates the HMAC (Security SC1+SC3).
+#
+# Most tests run with VADE_BRAKE_RACE_GRACE_SECONDS=0 to bypass the
+# wall-clock race window (tests don't write boot.log producer
+# end-markers; the race-window test exercises the gate explicitly).
 #
 # Exit 0 if all assertions pass, non-zero on first failure.
 
@@ -27,13 +36,9 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 GUARD="$REPO_ROOT/scripts/hooks/boot-brake-guard.sh"
 CLEAR="$REPO_ROOT/scripts/boot/boot-brake-clear.sh"
 
-# Test workspace — distinct per run to avoid cross-test contamination.
 TEST_ROOT="${TEST_ROOT:-/tmp/boot-brake-test-$$}"
 mkdir -p "$TEST_ROOT"
 
-# Manifest lives under VADE_COO_MEMORY_DIR. For CI, we point to the
-# real coo-memory checkout's operations/ directory. The repo layout
-# (coo-harness ./ + coo-memory ./../coo-memory) is the cloud convention.
 COO_MEMORY_DIR="${VADE_COO_MEMORY_DIR:-$(cd "$REPO_ROOT/../coo-memory" && pwd)}"
 
 PASS=0
@@ -67,6 +72,8 @@ _make_all_deliverables_present() {
   printf '{}' > "$home_dir/.claude/settings.json"
 }
 
+# Default invocation: race-gate disabled, fixture manifest. Override
+# VADE_BRAKE_RACE_GRACE_SECONDS or VADE_COO_MEMORY_DIR per-call.
 _invoke_guard() {
   local sid="$1" tool="$2" mode="$3" state_dir="$4" home_dir="$5"
   local arg6="${6:-}"
@@ -78,22 +85,30 @@ _invoke_guard() {
   esac
   printf '%s' "$input" | \
     VADE_BRAKE_ENFORCE="$mode" \
+    VADE_BRAKE_RACE_GRACE_SECONDS="${VADE_BRAKE_RACE_GRACE_SECONDS:-0}" \
     VADE_CLOUD_STATE_DIR="$state_dir" \
-    VADE_COO_MEMORY_DIR="$COO_MEMORY_DIR" \
+    VADE_COO_MEMORY_DIR="${VADE_COO_MEMORY_DIR_OVERRIDE:-$COO_MEMORY_DIR}" \
     HOME="$home_dir" \
     bash "$GUARD" 2>/dev/null
 }
 
+# Stage a fixture manifest with a custom path so we can test
+# unreadable-manifest semantics independently. Returns the manifest dir.
+_stage_fixture_manifest() {
+  local target_dir="$1"
+  mkdir -p "$target_dir/operations"
+  cp "$SCRIPT_DIR/fixtures/boot-deliverables.yml" "$target_dir/operations/boot-deliverables.yml"
+}
+
 # ─── Test 1: per-producer fault injection ────────────────────────
 echo "Test 1 — per-producer fault injection"
-for fault in integrity_check_json coo_bootstrap_marker user_settings_json; do
+for fault in integrity_check_json bootstrap_marker user_settings_json; do
   set -- $(echo "$(_setup_session_dirs "t1-$fault")" | tr '|' ' ')
   state_dir="$1"; home_dir="$2"
   _make_all_deliverables_present "$state_dir" "$home_dir"
-  # Remove the targeted deliverable
   case "$fault" in
     integrity_check_json)  rm -f "$state_dir/integrity-check.json" ;;
-    coo_bootstrap_marker)  rm -f "$home_dir/.vade/.coo-bootstrap-done" ;;
+    bootstrap_marker)      rm -f "$home_dir/.vade/.coo-bootstrap-done" ;;
     user_settings_json)    rm -f "$home_dir/.claude/settings.json" ;;
   esac
   _invoke_guard "t1-$fault" Bash block-on-FAIL "$state_dir" "$home_dir" "ls" > /dev/null
@@ -108,7 +123,6 @@ done
 echo "Test 2 — PreToolUse refusal smoke"
 set -- $(echo "$(_setup_session_dirs "t2")" | tr '|' ' ')
 state_dir="$1"; home_dir="$2"
-# All deliverables MISSING — first PreToolUse should write FAIL + deny
 out="$(_invoke_guard t2 Bash block-on-FAIL "$state_dir" "$home_dir" "ls")"
 if printf '%s' "$out" | grep -q '"permissionDecision":[[:space:]]*"deny"'; then
   _pass "block-on-FAIL deny emitted"
@@ -136,46 +150,44 @@ else
   _fail "Grep produced unexpected output: $out_grep"
 fi
 
-# ─── Test 6: sub-agent (Task) stays denied in FAIL ───────────────
-echo "Test 6 — Task tool stays denied in FAIL"
+# ─── Test 6: sub-agent (Task) stays denied + override scoping ────
+echo "Test 6 — Task denied in FAIL; override does not propagate"
 out_task="$(_invoke_guard t2 Task block-on-FAIL "$state_dir" "$home_dir" "")"
 if printf '%s' "$out_task" | grep -q '"permissionDecision":[[:space:]]*"deny"'; then
   _pass "Task denied in FAIL state"
 else
   _fail "Task NOT denied in FAIL state (got: $out_task)"
 fi
-# Override sentinel scoped to parent session should NOT propagate to a
-# different session_id. Write a valid override for the parent, then
-# attempt with a sub-agent's session_id (different).
-mkdir -p "$home_dir/.vade"
+
+# Override sentinel scoped to parent session. Compute HMAC using the
+# same length-prefixed payload as guard.py and unbrake.sh — security
+# review SC1 (expires_at in MAC scope) + SC3 (length-prefixing).
 parent_sid=t2
 child_sid=t2-child
-# Compose a valid override for parent_sid via the same HMAC derivation
 granted_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 expires_at="$(date -u -d '+30 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
   || date -u -v +30M +%Y-%m-%dT%H:%M:%SZ)"
-hmac_v="$(GRANTED_AT="$granted_at" SID="$parent_sid" REASON="test override for ci" python3 -c '
+hmac_v="$(GRANTED_AT="$granted_at" EXPIRES_AT="$expires_at" SID="$parent_sid" REASON="test override for ci" python3 -c '
 import hashlib, hmac, os, sys
-src = os.environ.get("OP_SERVICE_ACCOUNT_TOKEN") or os.environ.get("MEM0_API_KEY") or os.environ.get("GITHUB_MCP_PAT") or "vade-boot-brake-default-no-secrets"
+src = (os.environ.get("OP_SERVICE_ACCOUNT_TOKEN")
+       or os.environ.get("MEM0_API_KEY")
+       or os.environ.get("GITHUB_MCP_PAT")
+       or "vade-boot-brake-default-no-secrets")
 key = hashlib.sha256(src.encode()).digest()
-ga = os.environ["GRANTED_AT"]
-sid = os.environ["SID"]
-rs = os.environ["REASON"]
-msg = (ga + "|" + sid + "|" + rs).encode()
+parts = (os.environ["GRANTED_AT"], os.environ["EXPIRES_AT"], os.environ["SID"], os.environ["REASON"])
+msg = "|".join(str(len(p)) + ":" + p for p in parts).encode()
 sys.stdout.write(hmac.new(key, msg, hashlib.sha256).hexdigest())
 ')"
 cat > "$home_dir/.vade/boot-brake-override.${parent_sid}.json" <<EOF
 {"granted_at":"$granted_at","expires_at":"$expires_at","session_id":"$parent_sid","reason":"test override for ci","hmac":"$hmac_v"}
 EOF
 chmod 600 "$home_dir/.vade/boot-brake-override.${parent_sid}.json"
-# Parent's override should allow Bash for parent_sid
 out_parent="$(_invoke_guard $parent_sid Bash block-on-FAIL "$state_dir" "$home_dir" "ls")"
 if [ -z "$out_parent" ]; then
   _pass "Parent override allows parent's Bash"
 else
   _fail "Parent override did not allow parent's Bash (got: $out_parent)"
 fi
-# Child session (different sid) should still be denied — override does not propagate
 out_child="$(_invoke_guard $child_sid Bash block-on-FAIL "$state_dir" "$home_dir" "ls")"
 if printf '%s' "$out_child" | grep -q '"permissionDecision":[[:space:]]*"deny"'; then
   _pass "Sub-agent (different session_id) still denied — override does not propagate"
@@ -183,28 +195,31 @@ else
   _fail "Sub-agent override leaked from parent (got: $out_child)"
 fi
 
-# ─── Test 7: parallel-session isolation ──────────────────────────
-echo "Test 7 — parallel-session sentinel isolation"
+# ─── Test 7: parallel-session isolation + cache invalidation ─────
+echo "Test 7 — parallel-session isolation + cache invalidation"
 set -- $(echo "$(_setup_session_dirs "t7")" | tr '|' ' ')
 state_dir="$1"; home_dir="$2"
 _make_all_deliverables_present "$state_dir" "$home_dir"
-# Session A — all good → OK
+# Session A first fire → all-OK
 _invoke_guard t7-A Bash block-on-FAIL "$state_dir" "$home_dir" "ls" > /dev/null
-# Session B — corrupt its environment (remove deliverable AFTER A wrote sentinel)
+sleep 1.1  # past 1s backpressure cap so the next fire re-checks hashes
+# Remove a deliverable, re-fire A → cached OK must NOT survive
 rm -f "$state_dir/integrity-check.json"
-_invoke_guard t7-B Bash block-on-FAIL "$state_dir" "$home_dir" "ls" > /dev/null
-# Assert A's sentinel still records OK, B's records FAIL
-state_a="$(python3 -c "import json; print(json.load(open('$state_dir/boot-brake.t7-A.json'))['state'])")"
-state_b="$(python3 -c "import json; print(json.load(open('$state_dir/boot-brake.t7-B.json'))['state'])")"
-if [ "$state_a" = "OK" ]; then
-  _pass "Session A sentinel unchanged at OK after session B's failure"
+_invoke_guard t7-A Bash block-on-FAIL "$state_dir" "$home_dir" "ls" > /dev/null
+state_a_after="$(python3 -c "import json; print(json.load(open('$state_dir/boot-brake.t7-A.json'))['state'])")"
+if [ "$state_a_after" = "FAIL" ]; then
+  _pass "Cached-OK invalidated when previously-hashed deliverable deleted (Sys-Eng C1)"
 else
-  _fail "Session A sentinel cross-polluted (state=$state_a)"
+  _fail "Cached-OK survived deletion (state=$state_a_after; Sys-Eng C1 regression)"
 fi
-if [ "$state_b" = "FAIL" ]; then
-  _pass "Session B sentinel records FAIL independently"
+# Now session B sees its own sentinel independently — restore deliverable
+_make_all_deliverables_present "$state_dir" "$home_dir"
+_invoke_guard t7-B Bash block-on-FAIL "$state_dir" "$home_dir" "ls" > /dev/null
+state_b="$(python3 -c "import json; print(json.load(open('$state_dir/boot-brake.t7-B.json'))['state'])")"
+if [ "$state_b" = "OK" ]; then
+  _pass "Session B's sentinel records OK independently of A's history"
 else
-  _fail "Session B sentinel did not record FAIL (state=$state_b)"
+  _fail "Session B sentinel cross-polluted with A's state (state_b=$state_b)"
 fi
 
 # ─── Test 9: unparseable sentinel ────────────────────────────────
@@ -212,12 +227,9 @@ echo "Test 9 — unparseable sentinel re-validates without locking out"
 set -- $(echo "$(_setup_session_dirs "t9")" | tr '|' ' ')
 state_dir="$1"; home_dir="$2"
 _make_all_deliverables_present "$state_dir" "$home_dir"
-# Write a truncated/garbage sentinel
 printf '{"state":"OK"' > "$state_dir/boot-brake.t9.json"
-# Invoke — should NOT crash, should re-validate, should write a valid sentinel
 out="$(_invoke_guard t9 Bash block-on-FAIL "$state_dir" "$home_dir" "ls")"
 if [ -z "$out" ]; then
-  # Allowed (because deliverables are all present now after re-validation)
   if python3 -c "import json; json.load(open('$state_dir/boot-brake.t9.json'))" 2>/dev/null; then
     _pass "Unparseable sentinel re-validated, new sentinel is well-formed"
   else
@@ -226,11 +238,131 @@ if [ -z "$out" ]; then
 else
   _fail "Guard emitted unexpected output on unparseable sentinel: $out"
 fi
-# Fault log should exist
 if [ -d "$state_dir/boot-brake-faults" ] && [ -n "$(ls -A "$state_dir/boot-brake-faults" 2>/dev/null)" ]; then
   _pass "Unparseable sentinel wrote a fault diagnostic"
 else
   _fail "No fault diagnostic written for unparseable sentinel"
+fi
+
+# ─── Test 11 (NEW): manifest unreadable → validator self-fault ──
+echo "Test 11 — manifest unreadable → validator self-fault (Sys-Eng C2)"
+set -- $(echo "$(_setup_session_dirs "t11")" | tr '|' ' ')
+state_dir="$1"; home_dir="$2"
+_make_all_deliverables_present "$state_dir" "$home_dir"
+# Point at a non-existent manifest dir
+fake_manifest_dir="$TEST_ROOT/no-such-coo-memory"
+VADE_COO_MEMORY_DIR_OVERRIDE="$fake_manifest_dir" \
+  _invoke_guard t11 Bash block-on-FAIL "$state_dir" "$home_dir" "ls" > /dev/null
+state_t11="$(python3 -c "import json; d=json.load(open('$state_dir/boot-brake.t11.json')); print(d.get('cause','?'), d.get('state','?'))")"
+case "$state_t11" in
+  "validator_self_fault FAIL")
+    _pass "Manifest unreadable → state=FAIL with cause=validator_self_fault" ;;
+  *)
+    _fail "Manifest unreadable did not produce self-fault (got: $state_t11)" ;;
+esac
+
+# After self-fault, exercise the cached-revalidation path: re-fire
+# while manifest still unreadable. The previously-OK cached sentinel
+# from a prior test would NOT exist here (fresh state_dir), but the
+# self-fault sentinel itself must re-validate (Sys-Eng C2 second leg).
+sleep 1.1
+VADE_COO_MEMORY_DIR_OVERRIDE="$fake_manifest_dir" \
+  _invoke_guard t11 Bash block-on-FAIL "$state_dir" "$home_dir" "ls" > /dev/null
+state_t11_second="$(python3 -c "import json; d=json.load(open('$state_dir/boot-brake.t11.json')); print(d.get('cause','?'))")"
+if [ "$state_t11_second" = "validator_self_fault" ]; then
+  _pass "Subsequent fire with unreadable manifest stays self-fault (not stuck-PENDING)"
+else
+  _fail "Subsequent fire did not preserve self-fault (got cause=$state_t11_second)"
+fi
+
+# ─── Test 12 (NEW): race gate engaged ────────────────────────────
+echo "Test 12 — race gate engaged when producers haven't completed (Sys-Eng C3)"
+set -- $(echo "$(_setup_session_dirs "t12")" | tr '|' ' ')
+state_dir="$1"; home_dir="$2"
+# Note: all deliverables PRESENT, but no boot.log → fall back to
+# wall-clock grace. With grace_seconds=300 the race gate engages.
+_make_all_deliverables_present "$state_dir" "$home_dir"
+# Force a recent boot_started_at via a pre-staged sentinel
+now_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+cat > "$state_dir/boot-brake.t12.json" <<EOF
+{"state":"PENDING","checked_at":"$now_iso","checked_at_epoch":0,"manifest_version":0,"failures":[],"boot_started_at":"$now_iso","content_hashes":{}}
+EOF
+# Invoke with grace=300 so the race window is active
+out="$(printf '{"session_id":"t12","cwd":"/home/user","tool_name":"Bash","tool_input":{"command":"ls"}}' | \
+  VADE_BRAKE_ENFORCE=block-on-FAIL \
+  VADE_BRAKE_RACE_GRACE_SECONDS=300 \
+  VADE_CLOUD_STATE_DIR="$state_dir" \
+  VADE_COO_MEMORY_DIR="$COO_MEMORY_DIR" \
+  HOME="$home_dir" \
+  bash "$GUARD" 2>/dev/null)"
+state_t12="$(python3 -c "import json; d=json.load(open('$state_dir/boot-brake.t12.json')); print(d['state'])")"
+race_reason="$(python3 -c "import json; d=json.load(open('$state_dir/boot-brake.t12.json')); print((d.get('race_gate') or {}).get('reason','no'))")"
+if [ "$state_t12" = "PENDING" ] && [ "$race_reason" = "wall-clock grace" ]; then
+  _pass "Race gate engaged → state stays PENDING (no phantom FAIL)"
+else
+  _fail "Race gate did not engage (state=$state_t12, reason=$race_reason)"
+fi
+# PENDING + block-on-FAIL must allow (only block-strict denies PENDING)
+if [ -z "$out" ]; then
+  _pass "PENDING under block-on-FAIL allows tool call (block-strict denies)"
+else
+  _fail "PENDING under block-on-FAIL emitted output: $out"
+fi
+
+# ─── Test 13 (NEW): identity_consumed predicate-unmatched event ─
+echo "Test 13 — identity_consumed predicate-unmatched emits diagnostic (SRE F5)"
+set -- $(echo "$(_setup_session_dirs "t13")" | tr '|' ' ')
+state_dir="$1"; home_dir="$2"
+_make_all_deliverables_present "$state_dir" "$home_dir"
+# No persisted-output files exist for session t13. The predicate glob
+# expands to a path under home_dir that has nothing → predicate unmatched.
+_invoke_guard t13 Bash block-on-FAIL "$state_dir" "$home_dir" "ls" > /dev/null
+if grep -q '"cause":"identity_predicate_unmatched"' "$state_dir/brake-events.jsonl" 2>/dev/null; then
+  _pass "predicate-unmatched event emitted in brake-events.jsonl"
+else
+  _fail "predicate-unmatched event NOT emitted (events.jsonl content: $(cat "$state_dir/brake-events.jsonl" 2>/dev/null | tail -3))"
+fi
+
+# ─── Test 14 (NEW): override tamper resistance ──────────────────
+echo "Test 14 — tampering with override expires_at invalidates HMAC (Security SC1)"
+set -- $(echo "$(_setup_session_dirs "t14")" | tr '|' ' ')
+state_dir="$1"; home_dir="$2"
+# Reuse the test-6 override-write logic with a 1-minute TTL
+parent_sid=t14
+granted_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+expires_at="$(date -u -d '+1 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+  || date -u -v +1M +%Y-%m-%dT%H:%M:%SZ)"
+hmac_v="$(GRANTED_AT="$granted_at" EXPIRES_AT="$expires_at" SID="$parent_sid" REASON="testing tamper resistance" python3 -c '
+import hashlib, hmac, os, sys
+src = (os.environ.get("OP_SERVICE_ACCOUNT_TOKEN") or os.environ.get("MEM0_API_KEY") or os.environ.get("GITHUB_MCP_PAT") or "vade-boot-brake-default-no-secrets")
+key = hashlib.sha256(src.encode()).digest()
+parts = (os.environ["GRANTED_AT"], os.environ["EXPIRES_AT"], os.environ["SID"], os.environ["REASON"])
+msg = "|".join(str(len(p)) + ":" + p for p in parts).encode()
+sys.stdout.write(hmac.new(key, msg, hashlib.sha256).hexdigest())
+')"
+# Forge: change expires_at to far-future, keep HMAC computed with the
+# original. The guard MUST reject because expires_at is in the MAC scope.
+future_expires="2099-12-31T23:59:59Z"
+cat > "$home_dir/.vade/boot-brake-override.${parent_sid}.json" <<EOF
+{"granted_at":"$granted_at","expires_at":"$future_expires","session_id":"$parent_sid","reason":"testing tamper resistance","hmac":"$hmac_v"}
+EOF
+chmod 600 "$home_dir/.vade/boot-brake-override.${parent_sid}.json"
+out_tamper="$(_invoke_guard $parent_sid Bash block-on-FAIL "$state_dir" "$home_dir" "ls")"
+if printf '%s' "$out_tamper" | grep -q '"permissionDecision":[[:space:]]*"deny"'; then
+  _pass "Tampered expires_at → HMAC mismatch → override rejected → deny"
+else
+  _fail "Tampered override was honored — HMAC scope does not protect expires_at"
+fi
+# Also: empty expires_at must be treated as expired
+cat > "$home_dir/.vade/boot-brake-override.${parent_sid}.json" <<EOF
+{"granted_at":"$granted_at","expires_at":"","session_id":"$parent_sid","reason":"testing tamper resistance","hmac":"$hmac_v"}
+EOF
+chmod 600 "$home_dir/.vade/boot-brake-override.${parent_sid}.json"
+out_empty="$(_invoke_guard $parent_sid Bash block-on-FAIL "$state_dir" "$home_dir" "ls")"
+if printf '%s' "$out_empty" | grep -q '"permissionDecision":[[:space:]]*"deny"'; then
+  _pass "Empty expires_at → treated as expired → override rejected"
+else
+  _fail "Empty expires_at was treated as permanent — SC2 regression"
 fi
 
 # ─── Summary ────────────────────────────────────────────────────

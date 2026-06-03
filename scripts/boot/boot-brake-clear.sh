@@ -57,13 +57,13 @@ find "$VADE_CLOUD_STATE_DIR" -maxdepth 1 -name "boot-brake.*.json" -mmin +1440 2
     done
 
 # Expired override-sentinel sweep in $HOME/.vade/.
+# An empty/missing expires_at is treated as already-expired (security
+# review SC2: empty expires_at must never imply "permanent").
 mkdir -p "$HOME/.vade" 2>/dev/null || true
 find "$HOME/.vade" -maxdepth 1 -name "boot-brake-override.*.json" 2>/dev/null \
   | while IFS= read -r path; do
-      # Best-effort timestamp inspection. If the file is expired, remove.
       exp="$(jq -r '.expires_at // ""' "$path" 2>/dev/null || true)"
-      [ -z "$exp" ] && continue
-      if [ "$exp" \< "$now" ]; then
+      if [ -z "$exp" ] || [ "$exp" \< "$now" ]; then
         rm -f "$path" 2>/dev/null || true
       fi
     done
