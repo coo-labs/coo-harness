@@ -541,7 +541,18 @@ def emit_deny(reason, event=None, state_dir=None):
     sys.exit(0)
 
 
-WHITELIST_TOOLS = {"Read", "Grep"}
+# Tools that may run even when the brake is FAIL/PENDING under block-mode.
+# Restricted to non-substrate-affecting reads and in-session-memory updates:
+#   - Read, Grep, Glob  : filesystem inspection (no writes, no network)
+#   - AskUserQuestion   : agent → user clarification (no substrate effect)
+#   - TodoWrite         : in-session memory only (doesn't escape)
+# Surfaced by the 2026-06-03 soak verification: AskUserQuestion was the
+# most-impactful ergonomics gap — a brake-blocked instance trying to ask
+# Ven "what should I do?" was being denied as if it were a write tool.
+# Every other tool (Bash, Edit, Write, Skill, Task, MCP writes, WebFetch,
+# WebSearch, Monitor, NotebookEdit) stays denied — the threat model is
+# unchanged.
+WHITELIST_TOOLS = {"Read", "Grep", "Glob", "AskUserQuestion", "TodoWrite"}
 
 
 def main():
