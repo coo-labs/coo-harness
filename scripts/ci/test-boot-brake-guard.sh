@@ -365,6 +365,130 @@ else
   _fail "Empty expires_at was treated as permanent — SC2 regression"
 fi
 
+# ─── Test 15 (NEW): producer-complete tolerates skip-paths ─────
+echo "Test 15 — boot_producers_complete treats start+elapsed as done (soak-fix #A)"
+set -- $(echo "$(_setup_session_dirs "t15")" | tr '|' ' ')
+state_dir="$1"; home_dir="$2"
+_make_all_deliverables_present "$state_dir" "$home_dir"
+# Stage a boot.log with phase=start for each tracked producer and
+# NO phase=end (simulating coo-bootstrap's marker-present-skip path).
+# Backdate the start timestamps so elapsed > PRODUCER_DONE_THRESHOLD.
+mkdir -p "$home_dir/.vade"
+old_iso="$(date -u -d '-60 seconds' +%Y-%m-%dT%H:%M:%S.000Z 2>/dev/null \
+  || date -u -v -60S +%Y-%m-%dT%H:%M:%S.000Z)"
+cat > "$home_dir/.vade/boot.log" <<EOF
+{"ts":"$old_iso","session":"t15","script":"session-start-sync","phase":"start"}
+{"ts":"$old_iso","session":"t15","script":"coo-bootstrap","phase":"start"}
+{"ts":"$old_iso","session":"t15","script":"coo-identity-digest","phase":"start"}
+EOF
+# Invoke with race-gate ENABLED (grace=300). With the fix, the start+elapsed
+# path treats producers as done; race-gate clears; state transitions to OK.
+out="$(printf '{"session_id":"t15","cwd":"/home/user","tool_name":"Bash","tool_input":{"command":"ls"}}' | \
+  VADE_BRAKE_ENFORCE=block-on-FAIL \
+  VADE_BRAKE_RACE_GRACE_SECONDS=300 \
+  VADE_CLOUD_STATE_DIR="$state_dir" \
+  VADE_COO_MEMORY_DIR="$COO_MEMORY_DIR" \
+  HOME="$home_dir" \
+  bash "$GUARD" 2>/dev/null)"
+state_t15="$(python3 -c "import json; d=json.load(open('$state_dir/boot-brake.t15.json')); print(d['state'])")"
+if [ "$state_t15" = "OK" ]; then
+  _pass "Producers with start+elapsed > threshold treated as done; race-gate cleared"
+else
+  _fail "Race-gate stayed engaged despite producer-start being 60s old (state=$state_t15)"
+fi
+
+# Negative case: a producer that JUST started (no elapsed) keeps the race-gate engaged.
+set -- $(echo "$(_setup_session_dirs "t15b")" | tr '|' ' ')
+state_dir="$1"; home_dir="$2"
+_make_all_deliverables_present "$state_dir" "$home_dir"
+mkdir -p "$home_dir/.vade"
+now_iso="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+cat > "$home_dir/.vade/boot.log" <<EOF
+{"ts":"$now_iso","session":"t15b","script":"session-start-sync","phase":"start"}
+EOF
+printf '{"session_id":"t15b","cwd":"/home/user","tool_name":"Bash","tool_input":{"command":"ls"}}' | \
+  VADE_BRAKE_ENFORCE=block-on-FAIL \
+  VADE_BRAKE_RACE_GRACE_SECONDS=300 \
+  VADE_CLOUD_STATE_DIR="$state_dir" \
+  VADE_COO_MEMORY_DIR="$COO_MEMORY_DIR" \
+  HOME="$home_dir" \
+  bash "$GUARD" 2>/dev/null > /dev/null
+state_t15b="$(python3 -c "import json; d=json.load(open('$state_dir/boot-brake.t15b.json')); print(d['state'])")"
+missing_t15b="$(python3 -c "import json; d=json.load(open('$state_dir/boot-brake.t15b.json')); print(','.join((d.get('race_gate') or {}).get('missing_producers', [])))")"
+if [ "$state_t15b" = "PENDING" ] && [[ "$missing_t15b" == *"coo-bootstrap"* ]]; then
+  _pass "Producers with recent start still missing → race-gate stays engaged (negative case)"
+else
+  _fail "Negative race-gate check failed (state=$state_t15b, missing=$missing_t15b)"
+fi
+
+# ─── Test 16 (NEW): warn-mode event taxonomy split ──────────────
+echo "Test 16 — warn-mode tags PENDING as race_gate_observed (not would_have_denied) (soak-fix #C)"
+# Use t15b's PENDING sentinel from above; fire under VADE_BRAKE_ENFORCE=warn
+set -- $(echo "$(_setup_session_dirs "t16")" | tr '|' ' ')
+state_dir="$1"; home_dir="$2"
+_make_all_deliverables_present "$state_dir" "$home_dir"
+mkdir -p "$home_dir/.vade"
+now_iso="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+cat > "$home_dir/.vade/boot.log" <<EOF
+{"ts":"$now_iso","session":"t16","script":"session-start-sync","phase":"start"}
+EOF
+printf '{"session_id":"t16","cwd":"/home/user","tool_name":"Bash","tool_input":{"command":"ls"}}' | \
+  VADE_BRAKE_ENFORCE=warn \
+  VADE_BRAKE_RACE_GRACE_SECONDS=300 \
+  VADE_CLOUD_STATE_DIR="$state_dir" \
+  VADE_COO_MEMORY_DIR="$COO_MEMORY_DIR" \
+  HOME="$home_dir" \
+  bash "$GUARD" 2>/dev/null > /dev/null
+if grep -q '"cause":"race_gate_observed"' "$state_dir/brake-events.jsonl"; then
+  _pass "PENDING in warn mode → cause=race_gate_observed"
+else
+  _fail "PENDING in warn mode did not emit race_gate_observed (events: $(cat "$state_dir/brake-events.jsonl"))"
+fi
+if grep -q '"cause":"would_have_denied"' "$state_dir/brake-events.jsonl"; then
+  _fail "PENDING in warn mode incorrectly emitted would_have_denied (soak-signal pollution)"
+else
+  _pass "PENDING in warn mode does NOT emit would_have_denied (clean soak signal)"
+fi
+# FAIL in warn mode still emits would_have_denied
+rm -f "$state_dir/integrity-check.json"
+sleep 1.1  # past backpressure cap
+printf '{"session_id":"t16","cwd":"/home/user","tool_name":"Bash","tool_input":{"command":"ls"}}' | \
+  VADE_BRAKE_ENFORCE=warn \
+  VADE_BRAKE_RACE_GRACE_SECONDS=0 \
+  VADE_CLOUD_STATE_DIR="$state_dir" \
+  VADE_COO_MEMORY_DIR="$COO_MEMORY_DIR" \
+  HOME="$home_dir" \
+  bash "$GUARD" 2>/dev/null > /dev/null
+if grep -q '"cause":"would_have_denied"' "$state_dir/brake-events.jsonl"; then
+  _pass "FAIL in warn mode → cause=would_have_denied (real denial signal preserved)"
+else
+  _fail "FAIL in warn mode did not emit would_have_denied (events: $(cat "$state_dir/brake-events.jsonl"))"
+fi
+
+# ─── Test 17 (NEW): clear-hook is idempotent on resume/compaction ─
+echo "Test 17 — boot-brake-clear is idempotent (re-run after sentinel exists; soak-fix #B)"
+set -- $(echo "$(_setup_session_dirs "t17")" | tr '|' ' ')
+state_dir="$1"; home_dir="$2"
+# First run: clear-hook installs initial PENDING sentinel.
+VADE_CLOUD_STATE_DIR="$state_dir" HOME="$home_dir" \
+  CLAUDE_CODE_SESSION_ID="t17" \
+  bash "$CLEAR" 2>/dev/null </dev/null
+if [ -f "$state_dir/boot-brake.t17.json" ]; then
+  _pass "Clear-hook installs initial sentinel"
+else
+  _fail "Clear-hook did not install initial sentinel"
+fi
+# Second run: should be safe (same sentinel rewritten with current ts)
+VADE_CLOUD_STATE_DIR="$state_dir" HOME="$home_dir" \
+  CLAUDE_CODE_SESSION_ID="t17" \
+  bash "$CLEAR" 2>/dev/null </dev/null
+state_t17="$(python3 -c "import json; d=json.load(open('$state_dir/boot-brake.t17.json')); print(d['state'])")"
+if [ "$state_t17" = "PENDING" ]; then
+  _pass "Clear-hook re-run on existing sentinel is idempotent (PENDING preserved)"
+else
+  _fail "Clear-hook re-run corrupted sentinel (state=$state_t17)"
+fi
+
 # ─── Summary ────────────────────────────────────────────────────
 echo
 echo "===================================="

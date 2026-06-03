@@ -48,6 +48,10 @@
         "hooks": [
           {
             "type": "command",
+            "command": "bash \"$VADE_RUNTIME_DIR/scripts/boot/boot-brake-clear.sh\""
+          },
+          {
+            "type": "command",
             "command": "bash \"$VADE_RUNTIME_DIR/scripts/lifecycle/session-lifecycle.sh\""
           }
         ]
