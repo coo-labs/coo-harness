@@ -129,3 +129,16 @@ jobs:
 
       - name: Auto-subscribe PR hook — matcher contract (wrapper + raw)
         run: bash "$GITHUB_WORKSPACE/scripts/ci/test-auto-subscribe-pr.sh"
+
+      - name: Boot brake — guard + clear hook contract (coo-memory#1082 v2 §7)
+        env:
+          VADE_COO_MEMORY_DIR: ${{ github.workspace }}/coo-memory
+        run: |
+          # Stage a minimal coo-memory checkout next to coo-harness for the
+          # manifest's $VADE_COO_MEMORY_DIR — only operations/ is needed.
+          mkdir -p "$VADE_COO_MEMORY_DIR/operations"
+          cp "$GITHUB_WORKSPACE/scripts/ci/fixtures/boot-deliverables.yml" \
+             "$VADE_COO_MEMORY_DIR/operations/boot-deliverables.yml"
+          # PyYAML for the manifest reader
+          pip install --quiet pyyaml
+          bash "$GITHUB_WORKSPACE/scripts/ci/test-boot-brake-guard.sh"
