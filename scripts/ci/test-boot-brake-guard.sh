@@ -489,6 +489,41 @@ else
   _fail "Clear-hook re-run corrupted sentinel (state=$state_t17)"
 fi
 
+# ─── Test 18 (NEW): expanded whitelist for non-substrate tools ──
+echo "Test 18 — AskUserQuestion / TodoWrite / Glob whitelisted in FAIL"
+set -- $(echo "$(_setup_session_dirs "t18")" | tr '|' ' ')
+state_dir="$1"; home_dir="$2"
+# Leave deliverables missing → state will be FAIL
+for tool in AskUserQuestion TodoWrite Glob; do
+  input="{\"session_id\":\"t18\",\"cwd\":\"/home/user\",\"tool_name\":\"$tool\",\"tool_input\":{}}"
+  out="$(printf '%s' "$input" | \
+    VADE_BRAKE_ENFORCE=block-on-FAIL \
+    VADE_BRAKE_RACE_GRACE_SECONDS=0 \
+    VADE_CLOUD_STATE_DIR="$state_dir" \
+    VADE_COO_MEMORY_DIR="$COO_MEMORY_DIR" \
+    HOME="$home_dir" \
+    bash "$GUARD" 2>/dev/null)"
+  if [ -z "$out" ]; then
+    _pass "$tool silent-allow in FAIL (substrate-non-affecting)"
+  else
+    _fail "$tool produced unexpected output: $out"
+  fi
+done
+# Confirm a substrate-affecting tool is still denied for contrast
+input='{"session_id":"t18","cwd":"/home/user","tool_name":"Write","tool_input":{}}'
+out="$(printf '%s' "$input" | \
+  VADE_BRAKE_ENFORCE=block-on-FAIL \
+  VADE_BRAKE_RACE_GRACE_SECONDS=0 \
+  VADE_CLOUD_STATE_DIR="$state_dir" \
+  VADE_COO_MEMORY_DIR="$COO_MEMORY_DIR" \
+  HOME="$home_dir" \
+  bash "$GUARD" 2>/dev/null)"
+if printf '%s' "$out" | grep -q '"permissionDecision":[[:space:]]*"deny"'; then
+  _pass "Write still denied in FAIL (whitelist hasn't widened to writes)"
+else
+  _fail "Write was not denied — whitelist may have over-widened"
+fi
+
 # ─── Summary ────────────────────────────────────────────────────
 echo
 echo "===================================="
