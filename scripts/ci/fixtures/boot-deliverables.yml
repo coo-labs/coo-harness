@@ -1,11 +1,12 @@
-# Fixture manifest for boot-brake CI tests. Mirrors the Phase 0 entries
-# in coo-memory/operations/boot-deliverables.yml; refreshed manually
-# when the canonical manifest gains new entries.
+# Fixture manifest for boot-brake CI tests. Mirrors the canonical
+# entries in coo-memory/operations/boot-deliverables.yml; refreshed
+# manually when the canonical manifest gains new entries.
 #
 # Includes `identity_consumed` so the §11 consumed-signal mechanism
-# has CI coverage (Sys-Eng M1).
+# has CI coverage (Sys-Eng M1), plus the four Phase 1 always-on
+# identity-stack read gates (coo-memory#1169) exercised by Test 19.
 
-manifest_version: 1
+manifest_version: 2
 
 deliverables:
   - id: integrity_check_json
@@ -32,4 +33,35 @@ deliverables:
     check_arg: ".*/tool-results/hook-.*-stdout\\.txt$"
     predicate_exists_glob: $HOME/.claude/projects/$CWD_DASHIFIED/$SESSION_ID/tool-results/hook-*-stdout.txt
     producer: coo-harness/scripts/lifecycle/coo-identity-digest.sh
+    severity: critical
+
+  # Phase 1 (coo-memory#1169): always-on identity-stack reads, mirroring
+  # the canonical manifest. No predicate_exists_glob — required every
+  # boot. Exercised by Test 19.
+  - id: charter_consumed
+    path: dynamic
+    check_kind: read_observed
+    check_arg: "/identity/charter\\.md$"
+    producer: coo-memory/identity/charter.md
+    severity: critical
+
+  - id: governance_consumed
+    path: dynamic
+    check_kind: read_observed
+    check_arg: "/identity/governance\\.md$"
+    producer: coo-memory/identity/governance.md
+    severity: critical
+
+  - id: preferences_consumed
+    path: dynamic
+    check_kind: read_observed
+    check_arg: "/identity/preferences\\.md$"
+    producer: coo-memory/identity/preferences.md
+    severity: critical
+
+  - id: episodic_memory_consumed
+    path: dynamic
+    check_kind: read_observed
+    check_arg: "/identity/episodic_memory\\.md$"
+    producer: coo-memory/identity/episodic_memory.md
     severity: critical

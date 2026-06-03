@@ -66,10 +66,24 @@ _setup_session_dirs() {
 }
 
 _make_all_deliverables_present() {
-  local state_dir="$1" home_dir="$2"
+  local state_dir="$1" home_dir="$2" sid="${3:-}"
   printf '{"summary":{"ok":true}}' > "$state_dir/integrity-check.json"
   touch "$home_dir/.vade/.coo-bootstrap-done"
   printf '{}' > "$home_dir/.claude/settings.json"
+  # When a session id is supplied, also satisfy the Phase 1 always-on
+  # identity-stack read_observed entries (coo-memory#1169) by seeding the
+  # per-session Read log with the four identity files. Without this,
+  # "all deliverables present" would still FAIL the read-gated entries
+  # and any OK-expecting assertion would break.
+  if [ -n "$sid" ]; then
+    mkdir -p "$home_dir/.vade"
+    local ts; ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    local f
+    for f in charter governance preferences episodic_memory; do
+      printf '%s\t%s/identity/%s.md\n' "$ts" "$COO_MEMORY_DIR" "$f" \
+        >> "$home_dir/.vade/session-reads.$sid.log"
+    done
+  fi
 }
 
 # Default invocation: race-gate disabled, fixture manifest. Override
@@ -199,7 +213,7 @@ fi
 echo "Test 7 — parallel-session isolation + cache invalidation"
 set -- $(echo "$(_setup_session_dirs "t7")" | tr '|' ' ')
 state_dir="$1"; home_dir="$2"
-_make_all_deliverables_present "$state_dir" "$home_dir"
+_make_all_deliverables_present "$state_dir" "$home_dir" "t7-A"
 # Session A first fire → all-OK
 _invoke_guard t7-A Bash block-on-FAIL "$state_dir" "$home_dir" "ls" > /dev/null
 sleep 1.1  # past 1s backpressure cap so the next fire re-checks hashes
@@ -213,7 +227,7 @@ else
   _fail "Cached-OK survived deletion (state=$state_a_after; Sys-Eng C1 regression)"
 fi
 # Now session B sees its own sentinel independently — restore deliverable
-_make_all_deliverables_present "$state_dir" "$home_dir"
+_make_all_deliverables_present "$state_dir" "$home_dir" "t7-B"
 _invoke_guard t7-B Bash block-on-FAIL "$state_dir" "$home_dir" "ls" > /dev/null
 state_b="$(python3 -c "import json; print(json.load(open('$state_dir/boot-brake.t7-B.json'))['state'])")"
 if [ "$state_b" = "OK" ]; then
@@ -226,7 +240,7 @@ fi
 echo "Test 9 — unparseable sentinel re-validates without locking out"
 set -- $(echo "$(_setup_session_dirs "t9")" | tr '|' ' ')
 state_dir="$1"; home_dir="$2"
-_make_all_deliverables_present "$state_dir" "$home_dir"
+_make_all_deliverables_present "$state_dir" "$home_dir" "t9"
 printf '{"state":"OK"' > "$state_dir/boot-brake.t9.json"
 out="$(_invoke_guard t9 Bash block-on-FAIL "$state_dir" "$home_dir" "ls")"
 if [ -z "$out" ]; then
@@ -369,7 +383,7 @@ fi
 echo "Test 15 — boot_producers_complete treats start+elapsed as done (soak-fix #A)"
 set -- $(echo "$(_setup_session_dirs "t15")" | tr '|' ' ')
 state_dir="$1"; home_dir="$2"
-_make_all_deliverables_present "$state_dir" "$home_dir"
+_make_all_deliverables_present "$state_dir" "$home_dir" "t15"
 # Stage a boot.log with phase=start for each tracked producer and
 # NO phase=end (simulating coo-bootstrap's marker-present-skip path).
 # Backdate the start timestamps so elapsed > PRODUCER_DONE_THRESHOLD.
@@ -522,6 +536,61 @@ if printf '%s' "$out" | grep -q '"permissionDecision":[[:space:]]*"deny"'; then
   _pass "Write still denied in FAIL (whitelist hasn't widened to writes)"
 else
   _fail "Write was not denied — whitelist may have over-widened"
+fi
+
+# ─── Test 19 (NEW): identity-stack always-on read gate (coo-memory#1169) ─
+echo "Test 19 — identity-stack read_observed entries gate until Read (coo-memory#1169)"
+set -- $(echo "$(_setup_session_dirs "t19")" | tr '|' ' ')
+state_dir="$1"; home_dir="$2"
+# File deliverables present, but NO identity reads yet → the 4 always-on
+# *_consumed entries must FAIL.
+_make_all_deliverables_present "$state_dir" "$home_dir"
+_invoke_guard t19 Bash block-on-FAIL "$state_dir" "$home_dir" "ls" > /dev/null
+unread_all=1
+for d in charter_consumed governance_consumed preferences_consumed episodic_memory_consumed; do
+  grep -q "\"deliverable\":\"$d\"" "$state_dir/boot-brake.t19.json" 2>/dev/null || unread_all=0
+done
+if [ "$unread_all" = "1" ]; then
+  _pass "Identity stack unread → all 4 *_consumed entries recorded as failed"
+else
+  _fail "Not all 4 *_consumed entries failed (sentinel: $(cat "$state_dir/boot-brake.t19.json" 2>/dev/null))"
+fi
+# Deny reason collapses the 4 into a single aggregate directive (ergonomics)
+out19="$(_invoke_guard t19 Bash block-on-FAIL "$state_dir" "$home_dir" "ls")"
+if printf '%s' "$out19" | grep -q "identity stack not consumed"; then
+  _pass "Deny reason aggregates *_consumed entries into one directive"
+else
+  _fail "Deny reason did not aggregate *_consumed entries (got: $out19)"
+fi
+# Read all 4 identity files → state transitions to OK, Bash allowed.
+ts19="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+for f in charter governance preferences episodic_memory; do
+  printf '%s\t%s/identity/%s.md\n' "$ts19" "$COO_MEMORY_DIR" "$f" \
+    >> "$home_dir/.vade/session-reads.t19.log"
+done
+sleep 1.1  # past 1s backpressure cap so the next fire re-validates
+out19b="$(_invoke_guard t19 Bash block-on-FAIL "$state_dir" "$home_dir" "ls")"
+state_t19="$(python3 -c "import json; print(json.load(open('$state_dir/boot-brake.t19.json'))['state'])")"
+if [ "$state_t19" = "OK" ] && [ -z "$out19b" ]; then
+  _pass "All 4 identity files Read → state=OK, Bash allowed"
+else
+  _fail "Identity stack Read but not OK (state=$state_t19, out=$out19b)"
+fi
+# Partial read: only 3 of 4 → FAIL naming the unread entry (acceptance).
+set -- $(echo "$(_setup_session_dirs "t19c")" | tr '|' ' ')
+state_dir="$1"; home_dir="$2"
+_make_all_deliverables_present "$state_dir" "$home_dir"
+ts19c="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+for f in charter governance preferences; do
+  printf '%s\t%s/identity/%s.md\n' "$ts19c" "$COO_MEMORY_DIR" "$f" \
+    >> "$home_dir/.vade/session-reads.t19c.log"
+done
+_invoke_guard t19c Bash block-on-FAIL "$state_dir" "$home_dir" "ls" > /dev/null
+state_t19c="$(python3 -c "import json; print(json.load(open('$state_dir/boot-brake.t19c.json'))['state'])")"
+if [ "$state_t19c" = "FAIL" ] && grep -q '"deliverable":"episodic_memory_consumed"' "$state_dir/boot-brake.t19c.json"; then
+  _pass "Read 3 of 4 → FAIL naming the unread episodic_memory_consumed"
+else
+  _fail "Partial read did not FAIL on the unread entry (state=$state_t19c)"
 fi
 
 # ─── Summary ────────────────────────────────────────────────────

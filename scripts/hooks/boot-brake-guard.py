@@ -541,6 +541,55 @@ def emit_deny(reason, event=None, state_dir=None):
     sys.exit(0)
 
 
+def _strip_consumed_suffix(dlid):
+    """`charter_consumed` -> `charter`; leaves non-suffixed ids intact."""
+    suffix = "_consumed"
+    s = str(dlid)
+    return s[: -len(suffix)] if s.endswith(suffix) else s
+
+
+def format_failures(failures):
+    """Render the failing-deliverables summary for a deny reason.
+
+    Identity-stack `read_observed` entries (id ending `_consumed`)
+    collapse into a single directive when 2+ are failing — the typical
+    first-boot pattern, where listing each at ~80 chars blows past
+    readable density (coo-memory#1169 deny-reason ergonomics). Other
+    failures render individually, capped at 3 with a "plus N more" tail.
+    All interpolated values are sanitized; separators are safe-set only.
+    """
+    consumed = [f for f in failures if str(f.get("deliverable", "")).endswith("_consumed")]
+    other = [f for f in failures if not str(f.get("deliverable", "")).endswith("_consumed")]
+
+    segments = []
+    if len(consumed) >= 2:
+        names = " ".join(
+            sanitize(_strip_consumed_suffix(f.get("deliverable", "unknown")))
+            for f in consumed
+        )
+        segments.append(
+            "identity stack not consumed: " + names
+            + " -- Read the corresponding identity .md files and any "
+            "persisted boot digest before proceeding"
+        )
+    else:
+        for f in consumed:
+            segments.append(
+                f"{sanitize(f.get('deliverable', 'unknown'))}: {sanitize(f.get('reason', ''))}"
+            )
+
+    shown_other = other[:3]
+    for f in shown_other:
+        segments.append(
+            f"{sanitize(f.get('deliverable', 'unknown'))}: {sanitize(f.get('reason', ''))}"
+        )
+    overflow = len(other) - len(shown_other)
+    if overflow > 0:
+        segments.append(f"plus {overflow} more")
+
+    return " -- ".join(segments) if segments else "none"
+
+
 # Tools that may run even when the brake is FAIL/PENDING under block-mode.
 # Restricted to non-substrate-affecting reads and in-session-memory updates:
 #   - Read, Grep, Glob  : filesystem inspection (no writes, no network)
@@ -622,6 +671,10 @@ def main():
     #     re-evaluating to detect "producers now done → transition to
     #     OK/FAIL" without waiting for content-hash drift, which the
     #     race-gate path may not have recorded yet)
+    # FAIL is handled in the backpressure branch below (not here) so it
+    # re-checks at most once per second: a FAIL caused by an unsatisfied
+    # read_observed entry must clear when the agent Reads the file, which
+    # the content-hash drift check cannot see (coo-memory#1169).
     # Backpressure cap below bounds the cost.
     needs_revalidation = (
         sentinel is None
@@ -648,6 +701,15 @@ def main():
                 # pyyaml going missing or the manifest becoming unreadable.
                 needs_revalidation = True
             elif manifest_loaded:
+                # FAIL is not steady-state: re-validate past the
+                # backpressure cap so it clears as soon as the underlying
+                # condition is fixed. This is the only trigger that catches
+                # a now-satisfied read_observed entry (charter/governance/
+                # etc.), whose satisfaction changes via session Reads, not
+                # file content, and is therefore invisible to the
+                # content-hash drift check below (coo-memory#1169).
+                if sentinel.get("state") == "FAIL":
+                    needs_revalidation = True
                 m_version = manifest_loaded.get("manifest_version", 1)
                 if sentinel.get("manifest_version", 0) != m_version:
                     needs_revalidation = True
@@ -864,15 +926,10 @@ def main():
         sys.exit(0)
 
     failures = (sentinel or {}).get("failures", [])
-    # Format: "<dlid>: <reason> -- <dlid>: <reason>" — delimiters drawn
-    # from the safe set only. Interpolated values are sanitized.
-    fail_parts = [
-        f"{sanitize(f.get('deliverable', 'unknown'))}: {sanitize(f.get('reason', ''))}"
-        for f in failures[:3]
-    ]
-    fail_summary = " -- ".join(fail_parts)
-    if len(failures) > 3:
-        fail_summary += f" -- plus {len(failures) - 3} more"
+    # format_failures collapses the identity-stack *_consumed entries into
+    # one directive when 2+ are failing (coo-memory#1169 ergonomics);
+    # separators are safe-set only and interpolated values are sanitized.
+    fail_summary = format_failures(failures)
     state_safe = sanitize(state)
     reason = (
         f"Boot brake active. State: {state_safe}. "
