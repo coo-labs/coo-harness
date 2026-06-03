@@ -169,15 +169,29 @@ def write_fault(state_dir, message, exc=None):
 # SessionStart producers tracked by the race-gate (Sys-Eng C3). When
 # the first PreToolUse fires while these are still running, the brake
 # stays PENDING rather than emit phantom FAILs that pollute the 7-day
-# soak signal. The list mirrors the SessionStart `startup` matcher in
-# .claude/settings.json; new producers should be added here in the
-# same PR that registers them.
+# soak signal. Only producers of the manifest's critical deliverables
+# go here:
+#   - session-start-sync produces user_settings_json AND drives
+#     integrity-check.sh (integrity_check_json)
+#   - coo-bootstrap produces bootstrap_marker
+#   - coo-identity-digest produces the persisted-output file that
+#     triggers the identity_consumed predicate when the digest overflows
+# memo-index, discussions-digest, project-board-digest, and the
+# idle-watchdog are intentionally NOT tracked — they don't produce
+# manifest entries, so we don't wait on them.
 PRODUCERS_TO_TRACK = (
     "session-start-sync",
     "coo-bootstrap",
-    "memo-index",
     "coo-identity-digest",
 )
+
+# A producer is treated as "done" if either:
+#   - phase=end has been logged for this session, OR
+#   - phase=start has been logged AND elapsed > this threshold
+# The start-based fallback tolerates early-exit skip paths (e.g.
+# coo-bootstrap.sh's "marker present this container" branch which
+# does `trap - EXIT; exit 0` and never writes phase=end).
+PRODUCER_DONE_THRESHOLD_SECONDS = 15.0
 
 # Wall-clock grace window when boot.log is unavailable (Sys-Eng C3
 # fallback). The v2 design wanted producer end-markers as the primary
@@ -197,15 +211,25 @@ def _race_grace_seconds():
 def boot_producers_complete(home, session_id):
     """Returns (all_complete, missing_producers).
 
-    Reads $HOME/.vade/boot.log (newline-delimited JSON) for end-phase
-    entries scoped to this session_id. Each declared SessionStart
-    producer must have logged `phase=end`. If boot.log is missing or
-    unreadable, returns (None, []) to signal "fall back to wall-clock".
+    Reads $HOME/.vade/boot.log (newline-delimited JSON) for entries
+    scoped to this session_id. A producer is treated as complete if
+    either:
+      - phase=end has been logged (the canonical signal), OR
+      - phase=start has been logged AND elapsed since that start
+        exceeds PRODUCER_DONE_THRESHOLD_SECONDS (tolerates early-exit
+        skip paths that don't write phase=end — e.g. coo-bootstrap.sh's
+        "marker present this container" branch does `trap - EXIT; exit
+        0` without firing the _on_exit trap that would have logged the
+        end marker).
+
+    Returns (None, []) when boot.log is missing or unreadable so the
+    caller can fall back to the wall-clock grace heuristic.
     """
     log = Path(home) / ".vade" / "boot.log"
     if not log.exists():
         return None, []
     completed = set()
+    started = {}  # producer name → earliest start epoch
     try:
         with open(log) as fh:
             for line in fh:
@@ -215,11 +239,36 @@ def boot_producers_complete(home, session_id):
                     continue
                 if rec.get("session") != session_id:
                     continue
-                if rec.get("phase") == "end" and rec.get("script"):
-                    completed.add(rec["script"])
+                script = rec.get("script")
+                phase = rec.get("phase")
+                if not script or not phase:
+                    continue
+                if phase == "end":
+                    completed.add(script)
+                elif phase == "start":
+                    ts = rec.get("ts", "")
+                    try:
+                        # ts is e.g. "2026-06-03T11:22:53.123Z" — slice
+                        # the fractional seconds before strptime.
+                        ts_clean = ts.split(".")[0].rstrip("Z")
+                        start_epoch = time.mktime(time.strptime(
+                            ts_clean, "%Y-%m-%dT%H:%M:%S"
+                        )) - time.timezone
+                    except (ValueError, OverflowError):
+                        continue
+                    if script not in started or start_epoch < started[script]:
+                        started[script] = start_epoch
     except OSError:
         return None, []
-    missing = [p for p in PRODUCERS_TO_TRACK if p not in completed]
+
+    now = time.time()
+    missing = []
+    for p in PRODUCERS_TO_TRACK:
+        if p in completed:
+            continue
+        if p in started and (now - started[p]) > PRODUCER_DONE_THRESHOLD_SECONDS:
+            continue
+        missing.append(p)
     return (len(missing) == 0), missing
 
 
@@ -558,12 +607,15 @@ def main():
     # Initial revalidation triggers:
     #   - no sentinel at all (fresh session / first PreToolUse)
     #   - sentinel exists but is UNPARSEABLE
-    #   - sentinel is PENDING with epoch=0 (clear-hook initial; never validated)
+    #   - sentinel is PENDING (race-gate engaged previously; must keep
+    #     re-evaluating to detect "producers now done → transition to
+    #     OK/FAIL" without waiting for content-hash drift, which the
+    #     race-gate path may not have recorded yet)
+    # Backpressure cap below bounds the cost.
     needs_revalidation = (
         sentinel is None
         or sentinel.get("state") == "UNPARSEABLE"
-        or (sentinel.get("state") == "PENDING"
-            and sentinel.get("checked_at_epoch", 0) == 0)
+        or sentinel.get("state") == "PENDING"
     )
 
     # Backpressure cap: don't re-validate more than once per second.
@@ -762,15 +814,24 @@ def main():
     if state == "OK":
         sys.exit(0)
 
-    # FAIL / PENDING in warn mode → allow but log
+    # FAIL / PENDING in warn mode → allow but log. Tag distinctly so
+    # the Phase 1 aggregator's would-have-denied histogram isn't
+    # polluted by race-gate transients:
+    #   - state=FAIL   → cause=would_have_denied (real denial in block)
+    #   - state=PENDING → cause=race_gate_observed (block-on-FAIL would
+    #     have allowed; block-strict would have denied)
     if mode == "warn":
+        if state == "PENDING":
+            cause = "race_gate_observed"
+        else:
+            cause = "would_have_denied"
         append_event(state_dir, {
             "ts": now_iso(),
             "session_id": session_id,
             "tool": tool_name,
             "state": state,
             "mode": "warn",
-            "cause": "would_have_denied",
+            "cause": cause,
             "failures": (sentinel or {}).get("failures", []),
         })
         sys.exit(0)
