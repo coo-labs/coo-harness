@@ -593,6 +593,57 @@ else
   _fail "Partial read did not FAIL on the unread entry (state=$state_t19c)"
 fi
 
+# ─── Test 20 (NEW): every event carries schema version v (#1168 O1) ─
+echo "Test 20 — every brake event carries schema version v (coo-memory#1168 O1)"
+set -- $(echo "$(_setup_session_dirs "t20")" | tr '|' ' ')
+state_dir="$1"; home_dir="$2"
+# Warn-mode FAIL fire → would_have_denied (+ predicate_unmatched).
+_invoke_guard t20 Bash warn "$state_dir" "$home_dir" "ls" > /dev/null
+# Satisfy everything + reads, revalidate → FAIL->OK (all_satisfied transition).
+_make_all_deliverables_present "$state_dir" "$home_dir" "t20"
+sleep 1.1
+_invoke_guard t20 Bash block-on-FAIL "$state_dir" "$home_dir" "ls" > /dev/null
+total_ev="$(wc -l < "$state_dir/brake-events.jsonl")"
+with_v="$(jq -c 'select(.v==1)' "$state_dir/brake-events.jsonl" 2>/dev/null | wc -l)"
+if [ "$total_ev" -gt 0 ] && [ "$total_ev" = "$with_v" ]; then
+  _pass "all $total_ev events carry v==1"
+else
+  _fail "not all events carry v==1 ($with_v/$total_ev): $(cat "$state_dir/brake-events.jsonl")"
+fi
+
+# ─── Test 21 (NEW): sentinel records cause on OK and FAIL (#1168 O4) ─
+echo "Test 21 — sentinel records cause on OK and FAIL (coo-memory#1168 O4)"
+set -- $(echo "$(_setup_session_dirs "t21")" | tr '|' ' ')
+state_dir="$1"; home_dir="$2"
+_invoke_guard t21 Bash block-on-FAIL "$state_dir" "$home_dir" "ls" > /dev/null
+cause_fail="$(jq -r '.cause' "$state_dir/boot-brake.t21.json" 2>/dev/null)"
+_make_all_deliverables_present "$state_dir" "$home_dir" "t21"
+sleep 1.1
+_invoke_guard t21 Bash block-on-FAIL "$state_dir" "$home_dir" "ls" > /dev/null
+cause_ok="$(jq -r '.cause' "$state_dir/boot-brake.t21.json" 2>/dev/null)"
+if [ "$cause_fail" = "deliverable_missing" ] && [ "$cause_ok" = "all_satisfied" ]; then
+  _pass "sentinel cause: FAIL->deliverable_missing, OK->all_satisfied"
+else
+  _fail "sentinel cause wrong (fail=$cause_fail, ok=$cause_ok)"
+fi
+
+# ─── Test 22 (NEW): invalid override logs override_invalidated (#1168 O10) ─
+echo "Test 22 — invalid override logs cause=override_invalidated (coo-memory#1168 O10)"
+set -- $(echo "$(_setup_session_dirs "t22")" | tr '|' ' ')
+state_dir="$1"; home_dir="$2"
+# Far-future expiry but bogus HMAC → check_override returns hmac_mismatch.
+cat > "$home_dir/.vade/boot-brake-override.t22.json" <<EOF
+{"granted_at":"2026-01-01T00:00:00Z","expires_at":"2099-12-31T23:59:59Z","session_id":"t22","reason":"bogus","hmac":"deadbeef"}
+EOF
+chmod 600 "$home_dir/.vade/boot-brake-override.t22.json"
+_invoke_guard t22 Bash block-on-FAIL "$state_dir" "$home_dir" "ls" > /dev/null
+if grep -q '"cause":"override_invalidated"' "$state_dir/brake-events.jsonl" 2>/dev/null \
+   && grep -q '"failure_kind":"hmac_mismatch"' "$state_dir/brake-events.jsonl" 2>/dev/null; then
+  _pass "invalid override (bad HMAC) → cause=override_invalidated, failure_kind=hmac_mismatch"
+else
+  _fail "override_invalidated not logged: $(cat "$state_dir/brake-events.jsonl" 2>/dev/null)"
+fi
+
 # ─── Summary ────────────────────────────────────────────────────
 echo
 echo "===================================="
