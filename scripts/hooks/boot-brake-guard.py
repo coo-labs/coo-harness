@@ -116,9 +116,18 @@ def atomic_write_json(path, payload):
         return False
 
 
+# brake-events.jsonl schema version. Bump on any breaking change to the
+# event shape so a Phase 1 aggregator can detect format breaks across the
+# accumulated soak data (coo-memory#1168 O1). Every event line carries
+# this as "v"; it is injected centrally in append_event below.
+EVENT_SCHEMA_VERSION = 1
+
+
 def append_event(state_dir, event):
     path = Path(state_dir) / "brake-events.jsonl"
     try:
+        if "v" not in event:
+            event = {"v": EVENT_SCHEMA_VERSION, **event}
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "a") as fh:
             fh.write(json.dumps(event, separators=(",", ":")) + "\n")
@@ -641,23 +650,37 @@ def main():
     # every fire for audit completeness).
     ovr_ok, ovr_info = check_override(home, session_id)
     if ovr_ok:
+        # Non-transition event: an override grant is not a state-machine
+        # transition, so it carries no from/to (coo-memory#1168 O2). The
+        # `cause` field is the universal classifier across all events.
         append_event(state_dir, {
             "ts": now_iso(),
             "session_id": session_id,
             "tool": tool_name,
-            "from": "any",
-            "to": "OK",
             "cause": "manual_override_granted",
             "reason": sanitize(ovr_info.get("reason", "")),
         })
         sys.exit(0)
-    if ovr_info and ovr_info.get("failure") == "expired":
-        append_event(state_dir, {
-            "ts": now_iso(),
-            "session_id": session_id,
-            "cause": "manual_override_expired",
-            "expired_at": ovr_info.get("expired_at"),
-        })
+    if ovr_info and ovr_info.get("failure"):
+        fk = ovr_info.get("failure")
+        if fk == "expired":
+            append_event(state_dir, {
+                "ts": now_iso(),
+                "session_id": session_id,
+                "cause": "manual_override_expired",
+                "expired_at": ovr_info.get("expired_at"),
+            })
+        else:
+            # O10: an override that fails HMAC / session / expires_at
+            # validation is silently ignored by check_override. Surface it
+            # so an operator whose /unbrake didn't take has a signal
+            # (coo-memory#1168 O10).
+            append_event(state_dir, {
+                "ts": now_iso(),
+                "session_id": session_id,
+                "cause": "override_invalidated",
+                "failure_kind": sanitize(fk),
+            })
 
     sentinel_path = Path(state_dir) / f"boot-brake.{session_id}.json"
     sentinel, sentinel_err = read_cached_sentinel(sentinel_path)
@@ -817,6 +840,7 @@ def main():
                     "checked_at_epoch": now_epoch,
                     "manifest_version": manifest.get("manifest_version", 1),
                     "failures": [],
+                    "cause": "race_gate_engaged",
                     "boot_started_at": boot_started_at_str,
                     "content_hashes": (sentinel or {}).get("content_hashes", {}),
                     "race_gate": {
@@ -858,6 +882,9 @@ def main():
                     "checked_at_epoch": now_epoch,
                     "manifest_version": m_version,
                     "failures": failures,
+                    # O4: every sentinel write records a cause so the
+                    # runbook's `jq .cause` triage works uniformly.
+                    "cause": "deliverable_missing" if failures else "all_satisfied",
                     "boot_started_at": boot_started_at_str,
                     "content_hashes": hashes,
                 }
@@ -879,6 +906,7 @@ def main():
                         "tool": tool_name,
                         "from": prev_state,
                         "to": state,
+                        "cause": "all_satisfied",
                     })
 
     state = (sentinel or {}).get("state", "PENDING")
@@ -921,7 +949,7 @@ def main():
             "session_id": session_id,
             "tool": tool_name,
             "state": state,
-            "outcome": "whitelisted",
+            "cause": "whitelisted_in_fail",
         })
         sys.exit(0)
 
@@ -942,7 +970,7 @@ def main():
         "session_id": session_id,
         "tool": tool_name,
         "state": state,
-        "outcome": "denied",
+        "cause": "denied",
         "failures": failures,
     }, state_dir=state_dir)
 
