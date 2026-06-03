@@ -380,6 +380,50 @@ def _r2_upload(
         raise
 
 
+def _r2_head_object_metadata(
+    key: str,
+    *,
+    endpoint: str,
+    bucket: str,
+) -> dict[str, str] | None:
+    """Fetch R2 user-metadata for an existing key via head_object.
+
+    Used by the cede branch (coo-harness#416): on first-write-wins cede,
+    the canonical writer's sidecar JSON is embedded in
+    `x-amz-meta-vade-meta-json` on the ciphertext key. Reading it back
+    lets the second writer reconstruct the local sidecar from the first
+    writer's dict (not its own stale dict whose ciphertext_sha256 no
+    longer matches what's in R2).
+
+    Returns the lowercased Metadata dict on success, None on any failure
+    (caller falls back to breadcrumb-only behavior).
+    """
+    access_key = os.environ.get("R2_TRANSCRIPTS_ACCESS_KEY_ID", "").strip()
+    secret_key = os.environ.get("R2_TRANSCRIPTS_SECRET_ACCESS_KEY", "").strip()
+    if not access_key or not secret_key:
+        return None
+
+    try:
+        import boto3
+        from botocore.config import Config
+
+        s3 = boto3.client(
+            "s3",
+            endpoint_url=endpoint,
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
+            region_name="auto",
+            config=Config(
+                signature_version="s3v4",
+                retries={"max_attempts": 3, "mode": "standard"},
+            ),
+        )
+        resp = s3.head_object(Bucket=bucket, Key=key)
+        return resp.get("Metadata") or {}
+    except BaseException:
+        return None
+
+
 def _encode_meta_for_object_metadata(sidecar: dict) -> dict[str, str] | None:
     """Encode the meta sidecar dict for embedding as R2 object metadata.
 
@@ -802,18 +846,42 @@ def main() -> int:
                 # First-write-wins cede (coo-harness#204): another writer
                 # already holds this R2 key. Our ciphertext_sha256 does NOT
                 # match what's in R2 — writing meta.json with our SHA would
-                # re-create the mismatch this fix prevents. Drop a
-                # breadcrumb so operators can trace which session ceded,
-                # then exit cleanly without writing the sidecar or
-                # opening the auto-PR. The canonical writer's meta
-                # (in their object-metadata + flat-key) wins.
+                # re-create the mismatch the cede prevents. Instead, fetch
+                # the first writer's sidecar back from object metadata via
+                # head_object and continue the normal flat-key + sidecar +
+                # auto-PR flow with their dict. Keeps the transcript
+                # discoverable through every navigation path (coo-harness#416).
                 if upload.get("ceded"):
-                    _emit_meta_pr_error(
-                        sidecar_dir,
-                        session_id,
-                        f"R2 PUT ceded to first writer (key={r2_key}); skipped meta.json write",
+                    md = _r2_head_object_metadata(
+                        r2_key, endpoint=r2_endpoint, bucket=r2_bucket,
                     )
-                    return 0
+                    embed = (md or {}).get("vade-meta-json", "")
+                    recovered: dict | None = None
+                    if embed:
+                        try:
+                            recovered = json.loads(embed)
+                        except json.JSONDecodeError:
+                            recovered = None
+
+                    if recovered is None:
+                        # Outlier: first writer was too large to embed
+                        # (None return from _encode_meta_for_object_metadata)
+                        # or head_object itself failed. Fall through to the
+                        # prior breadcrumb-only behavior.
+                        _emit_meta_pr_error(
+                            sidecar_dir,
+                            session_id,
+                            f"R2 PUT ceded to first writer (key={r2_key}); "
+                            "vade-meta-json embed not recoverable; "
+                            "skipped meta.json write",
+                        )
+                        return 0
+
+                    _stderr(
+                        f"R2 PUT ceded; recovered first writer's meta via "
+                        f"head_object (key={r2_key})"
+                    )
+                    sidecar = recovered
 
             # Best-effort secondary: flat-key meta PUT (fast-resolve index
             # for transcript-fetch.py — avoids list+head_object on the
