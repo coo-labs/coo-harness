@@ -301,7 +301,10 @@
       "Bash(VADE_BRAKE_ENFORCE=block-on-FAIL VADE_CLOUD_STATE_DIR=/tmp/brake-test-2 VADE_COO_MEMORY_DIR=/home/user/coo-memory HOME=/tmp/brake-test-home2 bash /home/user/coo-harness/scripts/hooks/boot-brake-guard.sh)",
       "Bash(HOME=/tmp/integ-home bash /home/user/coo-memory/.claude/skills/unbrake/scripts/unbrake.sh \"integ-session\" \"integration test of full override path\")",
       "Bash(VADE_BRAKE_ENFORCE=block-on-FAIL VADE_CLOUD_STATE_DIR=/tmp/integ-state VADE_COO_MEMORY_DIR=/home/user/coo-memory HOME=/tmp/integ-home bash /home/user/coo-harness/scripts/hooks/boot-brake-guard.sh)",
-      "Bash(mkdir -p /tmp/integ-state /tmp/integ-home/.vade /tmp/integ-home/.claude)"
+      "Bash(mkdir -p /tmp/integ-state /tmp/integ-home/.vade /tmp/integ-home/.claude)",
+      "Bash(HOME=/tmp/integ2-home bash /home/user/coo-memory/.claude/skills/unbrake/scripts/unbrake.sh \"integ2-session\" \"verifying full override path with new HMAC scope\")",
+      "Bash(VADE_BRAKE_ENFORCE=block-on-FAIL VADE_BRAKE_RACE_GRACE_SECONDS=0 VADE_CLOUD_STATE_DIR=/tmp/integ2-state VADE_COO_MEMORY_DIR=/home/user/coo-memory HOME=/tmp/integ2-home bash /home/user/coo-harness/scripts/hooks/boot-brake-guard.sh)",
+      "Bash(mkdir -p /tmp/integ2-state /tmp/integ2-home/.vade /tmp/integ2-home/.claude)"
     ],
     "additionalDirectories": [
       "/tmp"
