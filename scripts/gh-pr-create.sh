@@ -120,6 +120,15 @@ if [ "$skip_check" -eq 1 ]; then
   exec gh pr create "${pass_args[@]}"
 fi
 
+# Mirror the workflow's exempt-class registry for session-log PRs: title
+# prefix `session:` is the contract used by the /end-session skill and the
+# auto-subscribe-pr hook. The coo-logs auto-merge workflow doesn't gate on
+# closing keywords for these, so the local lint shouldn't either — saves
+# the agent from remembering --skip-closing-keyword-check.
+if [[ "$title" == session:* ]]; then
+  exec gh pr create "${pass_args[@]}"
+fi
+
 # Resolve body content for the lint. Title + body together, mirroring
 # the workflow's title-OR-body check.
 content="$title"
