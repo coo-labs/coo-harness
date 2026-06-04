@@ -6,7 +6,7 @@
       "args": [
         "run",
         "--env-file",
-        "/home/user/coo-harness/scripts/lib/mcp-env-templates/mem0.env",
+        "/dev/shm/coo-mcp-env/mem0.env",
         "--",
         "/home/user/coo-harness/scripts/mcp/mem0-mcp-projection.py"
       ],
@@ -19,7 +19,7 @@
       "args": [
         "run",
         "--env-file",
-        "/home/user/coo-harness/scripts/lib/mcp-env-templates/agentmail.env",
+        "/dev/shm/coo-mcp-env/agentmail.env",
         "--",
         "npx",
         "-y",

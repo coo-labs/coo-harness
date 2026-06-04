@@ -352,6 +352,15 @@ merge_coo_settings_env
 COO_BOOTSTRAP_STEP="merge_coo_settings_paths"
 merge_coo_settings_paths
 
+# Pre-materialize MCP env-file templates to tmpfs with op:// refs replaced
+# by the values fetch_coo_secrets just exported. Phase 2 follow-up: kills
+# the per-MCP-spawn op-read load (each `op run --env-file` now sees a file
+# with no op:// refs and passes through without API calls). 1P account-level
+# rate-limit (1000 read+write per 24h on Personal/Teams) was being approached
+# by the per-spawn pattern. coo-memory#871 follow-up.
+COO_BOOTSTRAP_STEP="materialize_mcp_env_files"
+materialize_mcp_env_files
+
 COO_BOOTSTRAP_STEP="summarize_coo_identity"
 summarize_coo_identity
 

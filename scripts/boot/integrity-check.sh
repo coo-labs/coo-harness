@@ -248,16 +248,26 @@ fi
 # D4: Phase 2 (coo-memory#873): MCP tokens no longer live in settings.json env.
 # MCP children receive secrets via `op run --env-file` at spawn time.
 # The check now verifies:
-#   1. MCP env-template files are present (op run --env-file targets exist).
-#   2. settings.json env does NOT contain secret keys (Phase 2 scrub).
-#   3. VADE_*_DIR vars are in process env (container UI .env-block source).
+#   1. MCP env-template files are present (op run --env-file SOURCE).
+#   2. Materialized MCP env files are present at the .mcp.json-pinned path
+#      (op run --env-file TARGET). Phase 2 follow-up: pre-materialization at
+#      bootstrap eliminates per-spawn op-reads against the 1P account-level
+#      rate-limit.
+#   3. settings.json env does NOT contain secret keys (Phase 2 scrub).
+#   4. VADE_*_DIR vars are in process env (container UI .env-block source).
 if check_cmd node && [ -f "$HOME/.claude/settings.json" ]; then
   _MCP_TEMPLATE_DIR="${VADE_RUNTIME_DIR:-/home/user/coo-harness}/scripts/lib/mcp-env-templates"
+  _MCP_MATERIALIZED_DIR="/dev/shm/coo-mcp-env"
   D4_missing_templates=""
   for t in mem0.env agentmail.env; do
     [ -f "$_MCP_TEMPLATE_DIR/$t" ] || D4_missing_templates="${D4_missing_templates}${t},"
   done
   D4_missing_templates="${D4_missing_templates%,}"
+  D4_missing_materialized=""
+  for t in mem0.env agentmail.env; do
+    [ -f "$_MCP_MATERIALIZED_DIR/$t" ] || D4_missing_materialized="${D4_missing_materialized}${t},"
+  done
+  D4_missing_materialized="${D4_missing_materialized%,}"
   D4_stale_secrets="$(node -e '
     const fs = require("fs");
     let c = {};
@@ -276,11 +286,12 @@ if check_cmd node && [ -f "$HOME/.claude/settings.json" ]; then
     [ -z "$val" ] && D4_missing_dirs="${D4_missing_dirs}${v},"
   done
   D4_missing_dirs="${D4_missing_dirs%,}"
-  if [ -z "$D4_missing_templates" ] && [ -z "$D4_stale_secrets" ] && [ -z "$D4_missing_dirs" ]; then
-    _add D4 true "MCP env-templates present; settings.json env secret-free; VADE_*_DIR in process env"
+  if [ -z "$D4_missing_templates" ] && [ -z "$D4_missing_materialized" ] && [ -z "$D4_stale_secrets" ] && [ -z "$D4_missing_dirs" ]; then
+    _add D4 true "MCP templates + materialized present; settings.json env secret-free; VADE_*_DIR in process env"
   else
     detail=""
     [ -n "$D4_missing_templates" ] && detail="MCP templates missing: $D4_missing_templates"
+    [ -n "$D4_missing_materialized" ] && detail="${detail:+$detail; }MCP materialized files missing at $_MCP_MATERIALIZED_DIR: $D4_missing_materialized"
     [ -n "$D4_stale_secrets" ] && detail="${detail:+$detail; }secrets still in settings.json: $D4_stale_secrets"
     [ -n "$D4_missing_dirs" ] && detail="${detail:+$detail; }process env missing: $D4_missing_dirs"
     _add D4 false "$detail"
