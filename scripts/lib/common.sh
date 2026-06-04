@@ -1399,195 +1399,137 @@ ensure_gh_coo_wrap() {
   log "gh-coo-wrap: installed (wrapper at $gh_path, real binary at $real_path)"
 }
 
-# Fetch COO secrets from 1Password and write ~/.vade/coo-env plus a
-# merged env block in ~/.claude/settings.json so Claude Code resolves
-# ${GITHUB_MCP_PAT} / ${AGENTMAIL_API_KEY} at startup. Each read is
-# independent — a missing item logs a warning and leaves the
-# corresponding env var unset rather than aborting. Callers that
-# depend on a specific var (e.g. validate_coo_identity needs
-# GITHUB_MCP_PAT) are responsible for their own presence check.
-# Returns 0 if at least one secret was fetched; 1 only if every
-# read failed.
+# Fetch COO secrets from 1Password via a schema-driven iterator.
+#
+# Reads operations/secrets/schema.yaml (Track 4 Phase 1 refactor,
+# coo-memory#871) and calls schema-fetch-secrets.py, which iterates
+# active credentials and emits `export VAR=VALUE` lines. The Python
+# helper handles status discipline (dormant/retired/pending_* are
+# skipped) and multi-field credentials (r2-transcripts, cloudflare,
+# github-app-vade-coo-app). All reads are best-effort — a missing
+# item warns and leaves the var unset; only a total-fetch-zero is fatal.
+#
+# The schema path is resolved via $VADE_COO_MEMORY_DIR (injected by the
+# cloud UI .env block; defaults to /home/user/coo-memory). Fail-closed
+# if the schema file is unreadable or PyYAML is missing — boot should
+# not continue without a working secrets pipeline (coo-memory#871).
+#
+# Output shape is identical to the old hardcoded implementation:
+# coo-env written at mode 0600; same vars exported to current shell;
+# settings.json mutation deferred to merge_coo_settings_env (post-
+# validate_coo_identity). The Phase 1 compat constraint holds:
+# no plaintext is removed from settings.json, no op run --env-file
+# spawn path is introduced. Those are Phase 2 changes.
+#
+# Returns 0 if at least one secret was fetched; exits non-zero on
+# schema-parse failure; returns 1 if every op read failed.
 fetch_coo_secrets() {
-  log "Fetching COO secrets from 1Password vault COO"
-  local github_pat="" github_public_pat="" agentmail_key="" mem0_key=""
-  local r2_access_key_id="" r2_secret_access_key="" age_identity=""
-  local vade_auth_token="" cloudflare_api_token="" cloudflare_account_id=""
-  local github_app_id="" github_app_installation_id=""
-  local got=0
+  log "Fetching COO secrets from 1Password vault COO (schema-iterator)"
 
-  if github_pat="$(retry 3 op read 'op://COO/vade-coo-self-2026-04/token')" && [ -n "$github_pat" ]; then
-    log "  read GitHub PAT (len=${#github_pat})"
-    got=$((got+1))
-  else
-    github_pat=""
-    log "  WARN: op://COO/vade-coo-self-2026-04/token unavailable; GITHUB_MCP_PAT/GITHUB_TOKEN will be unset"
+  local schema_path="${VADE_COO_MEMORY_DIR:-/home/user/coo-memory}/operations/secrets/schema.yaml"
+  local helper="${VADE_RUNTIME_DIR:-/home/user/coo-harness}/scripts/boot/schema-fetch-secrets.py"
+
+  # Fail closed: schema unreadable = bootstrap cannot continue.
+  if [ ! -f "$schema_path" ]; then
+    log "FATAL: schema file not found: $schema_path"
+    log "  Ensure VADE_COO_MEMORY_DIR points at a coo-memory checkout."
+    return 1
   fi
-
-  # Cross-org public-repo PAT (classic, `public_repo` scope), used by
-  # gh-coo-wrap to route writes targeting owners outside coo-labs/* to a
-  # broader-scope token. MEMO-2026-05-11-6xv2. Best-effort: missing item
-  # warns and leaves GITHUB_PUBLIC_PAT unset — the wrapper falls back to
-  # pass-through behavior and any cross-org write 403s with a clean
-  # auth error rather than landing under the wrong identity.
-  if github_public_pat="$(retry 3 op read 'op://COO/GITHUB_PUBLIC_PAT/credential')" && [ -n "$github_public_pat" ]; then
-    log "  read GitHub public PAT (len=${#github_public_pat})"
-    got=$((got+1))
-  else
-    github_public_pat=""
-    log "  WARN: op://COO/GITHUB_PUBLIC_PAT/credential unavailable; GITHUB_PUBLIC_PAT will be unset (gh-coo-wrap cross-org routing disabled)"
+  if [ ! -f "$helper" ]; then
+    log "FATAL: schema-fetch-secrets.py not found: $helper"
+    log "  Ensure VADE_RUNTIME_DIR points at the coo-harness checkout."
+    return 1
   fi
-
-  if agentmail_key="$(retry 3 op read 'op://COO/agentmail-vade-coo/credential')" && [ -n "$agentmail_key" ]; then
-    log "  read AgentMail API key (len=${#agentmail_key})"
-    got=$((got+1))
-  else
-    agentmail_key=""
-    log "  WARN: op://COO/agentmail-vade-coo/credential unavailable; AGENTMAIL_API_KEY will be unset"
-  fi
-
-  if mem0_key="$(retry 3 op read 'op://COO/mem0-vade-coo/credential')" && [ -n "$mem0_key" ]; then
-    log "  read Mem0 API key (len=${#mem0_key})"
-    got=$((got+1))
-  else
-    mem0_key=""
-    log "  WARN: op://COO/mem0-vade-coo/credential unavailable; MEM0_API_KEY will be unset (mem0-rest.sh break-glass path disabled)"
-  fi
-
-  # Transcript-export pipeline (coo-labs/coo-logs#64). All three
-  # are best-effort; absence disables the export hook, which writes
-  # <sessionId>.export-error.txt and exits 0 (never blocks session end).
-  if r2_access_key_id="$(retry 3 op read 'op://COO/r2-transcripts/access-key-id')" && [ -n "$r2_access_key_id" ]; then
-    log "  read R2 transcripts access key id (len=${#r2_access_key_id})"
-    got=$((got+1))
-  else
-    r2_access_key_id=""
-    log "  WARN: op://COO/r2-transcripts/access-key-id unavailable; transcript export hook will skip R2 upload"
-  fi
-
-  if r2_secret_access_key="$(retry 3 op read 'op://COO/r2-transcripts/secret-access-key')" && [ -n "$r2_secret_access_key" ]; then
-    log "  read R2 transcripts secret access key (len=${#r2_secret_access_key})"
-    got=$((got+1))
-  else
-    r2_secret_access_key=""
-    log "  WARN: op://COO/r2-transcripts/secret-access-key unavailable; transcript export hook will skip R2 upload"
-  fi
-
-  if age_identity="$(retry 3 op read 'op://COO/transcripts-age-key/credential')" && [ -n "$age_identity" ]; then
-    log "  read transcripts age identity (len=${#age_identity})"
-    got=$((got+1))
-  else
-    age_identity=""
-    log "  WARN: op://COO/transcripts-age-key/credential unavailable; transcript decryption (Stage-1 analyzer) disabled — encryption still works (recipient pubkey is committed at scripts/lib/transcripts-recipient.age)"
-  fi
-
-  # Cloudflare API token for COO-driven Worker deploys + DNS edits on
-  # vade-app.dev. Carve-out scope: MEMO-2026-05-09-vwk2 (in-scope:
-  # `wrangler deploy/secret` on existing Workers, DNS CRUD on
-  # vade-app.dev, Workers Routes binding, all reads; out-of-scope:
-  # creating new R2/D1/KV/Workers/zones, plan upgrades — BDFL approval).
-  # Best-effort: missing item warns and leaves CLOUDFLARE_API_TOKEN
-  # unset (wrangler then fails with a clean auth error rather than a
-  # stale or wrong-account credential).
-  if cloudflare_api_token="$(retry 3 op read 'op://COO/cloudflare-api-token-vade-coo/credential')" && [ -n "$cloudflare_api_token" ]; then
-    log "  read Cloudflare API token (len=${#cloudflare_api_token})"
-    got=$((got+1))
-  else
-    cloudflare_api_token=""
-    log "  WARN: op://COO/cloudflare-api-token-vade-coo/credential unavailable; CLOUDFLARE_API_TOKEN will be unset (wrangler deploy/secret and DNS edits unauthenticated)"
-  fi
-
-  # Cloudflare account_id pairs with the token. Account-owned tokens
-  # (cfat_ prefix) require account-scoped endpoints for verify/list
-  # operations; the integrity probe and any direct API calls need the
-  # account UUID. wrangler reads CLOUDFLARE_ACCOUNT_ID from env when
-  # multiple accounts are visible.
-  if cloudflare_account_id="$(retry 3 op read 'op://COO/cloudflare-api-token-vade-coo/account_id')" && [ -n "$cloudflare_account_id" ]; then
-    log "  read Cloudflare account id (len=${#cloudflare_account_id})"
-    got=$((got+1))
-  else
-    cloudflare_account_id=""
-    log "  WARN: op://COO/cloudflare-api-token-vade-coo/account_id unavailable; CLOUDFLARE_ACCOUNT_ID will be unset (E9 probe will skip; wrangler may prompt for account selection)"
-  fi
-
-  # vade-coo-app GitHub App identifiers (MEMO-2026-05-21 coo-memory#837).
-  # Public values only: app_id and installation_id propagate to env so the
-  # `gh-app-token.sh` minter skips two op reads per fresh-token mint. The
-  # private key (op://COO/vade-coo-app/private_key) intentionally stays in
-  # 1Password — the minter reads it on cache miss only (tokens cached
-  # ~55 min in $VADE_CLOUD_STATE_DIR/gh-app-token-cache.json), so the
-  # sensitive material never lands in settings.json env. Best-effort
-  # fetch: missing item warns and leaves both unset; the minter then
-  # falls back to op reads for the IDs too, but with two extra round-
-  # trips per mint. Both unset = App not yet provisioned (Phase 1 not
-  # done); gh-coo-wrap routing simply skips the App-token branch.
-  if github_app_id="$(retry 3 op read 'op://COO/vade-coo-app/app_id')" && [ -n "$github_app_id" ]; then
-    log "  read GitHub App ID (len=${#github_app_id})"
-    got=$((got+1))
-  else
-    github_app_id=""
-    log "  WARN: op://COO/vade-coo-app/app_id unavailable; GITHUB_APP_ID will be unset (gh-coo-wrap org-admin routing will fall back to op reads or pass through)"
-  fi
-
-  if github_app_installation_id="$(retry 3 op read 'op://COO/vade-coo-app/installation_id')" && [ -n "$github_app_installation_id" ]; then
-    log "  read GitHub App installation ID (len=${#github_app_installation_id})"
-    got=$((got+1))
-  else
-    github_app_installation_id=""
-    log "  WARN: op://COO/vade-coo-app/installation_id unavailable; GITHUB_APP_INSTALLATION_ID will be unset"
-  fi
-
-  if [ "$got" -eq 0 ]; then
-    log "  no COO secrets could be fetched; skipping env file write"
+  if ! check_cmd python3; then
+    log "FATAL: python3 not on PATH; cannot run schema-fetch-secrets.py"
     return 1
   fi
 
   local env_file="${HOME}/.vade/coo-env"
   mkdir -p "$(dirname "$env_file")"
-  # Use `if/then; fi` rather than `[ -n "$X" ] && echo ...` for the
-  # conditional emits below: under `set -euo pipefail` (inherited by
-  # the subshell when bash inherit_errexit is active), the `&&` form
-  # returns rc=1 when the test is false, which set -e then catches.
-  # The `if` form lets the rc of `echo` be the only thing observed.
+
+  # Run the schema iterator. Its stdout is eval-safe export lines plus a
+  # SCHEMA_FETCH_GOT=N line; stderr carries the per-credential log lines.
+  # Capture stdout; let stderr flow to the caller's log (same as retry's
+  # log_err pattern). Fail-open on individual credential failures (each
+  # warn is emitted by the helper); fail-closed only on schema error (rc=1).
+  local fetch_output
+  local fetch_rc=0
+  fetch_output="$(python3 "$helper" --schema "$schema_path")" || fetch_rc=$?
+
+  if [ "$fetch_rc" -eq 1 ] && [ -z "$fetch_output" ]; then
+    # Schema parse error: the helper printed nothing useful and exited 1.
+    log "FATAL: schema-fetch-secrets.py failed with no output (schema parse error)"
+    return 1
+  fi
+
+  # Eval the export lines into the current shell. Eval of attacker-controlled
+  # input would be dangerous, but this output is produced by our own helper
+  # from 1Password reads — same trust level as the prior op read pipeline.
+  # The helper shell-single-quotes all values so injection via token content
+  # is not possible (a literal single-quote in a token value is handled by
+  # the helper's shell_single_quote function).
+  #
+  # The eval also exports SCHEMA_FETCH_GOT=N (not exported, just a shell var).
+  SCHEMA_FETCH_GOT=0
+  eval "$fetch_output" 2>/dev/null || true
+
+  if [ "${SCHEMA_FETCH_GOT:-0}" -eq 0 ]; then
+    log "  no COO secrets could be fetched; skipping env file write"
+    return 1
+  fi
+
+  # Write the coo-env file from the now-exported vars. Same conditional
+  # pattern as before (set -e safety). New vars beyond the original set
+  # flow through automatically because the helper emits them and eval
+  # exports them; the env file write below is keyed to the declared set.
+  #
+  # Note: GITHUB_TOKEN is an alias for GITHUB_MCP_PAT (same value).
+  # The schema lists it as an env_alias on github-pat-vade-coo; the
+  # helper exports it. We mirror it here for compat with any consumer
+  # that sources coo-env and expects GITHUB_TOKEN separately.
   (
     umask 077
     {
       echo "# Auto-generated by coo-bootstrap.sh. Do not commit. chmod 600."
-      if [ -n "$github_pat" ];           then echo "export GITHUB_MCP_PAT='$github_pat'"; fi
-      if [ -n "$github_pat" ];           then echo "export GITHUB_TOKEN='$github_pat'"; fi
-      if [ -n "$github_public_pat" ];    then echo "export GITHUB_PUBLIC_PAT='$github_public_pat'"; fi
-      if [ -n "$agentmail_key" ];        then echo "export AGENTMAIL_API_KEY='$agentmail_key'"; fi
-      if [ -n "$mem0_key" ];             then echo "export MEM0_API_KEY='$mem0_key'"; fi
-      if [ -n "$r2_access_key_id" ];     then echo "export R2_TRANSCRIPTS_ACCESS_KEY_ID='$r2_access_key_id'"; fi
-      if [ -n "$r2_secret_access_key" ]; then echo "export R2_TRANSCRIPTS_SECRET_ACCESS_KEY='$r2_secret_access_key'"; fi
-      if [ -n "$age_identity" ];         then echo "export TRANSCRIPTS_AGE_IDENTITY='$age_identity'"; fi
-      if [ -n "$vade_auth_token" ];      then echo "export VADE_AUTH_TOKEN='$vade_auth_token'"; fi
-      if [ -n "$cloudflare_api_token" ]; then echo "export CLOUDFLARE_API_TOKEN='$cloudflare_api_token'"; fi
-      if [ -n "$cloudflare_account_id" ]; then echo "export CLOUDFLARE_ACCOUNT_ID='$cloudflare_account_id'"; fi
-      if [ -n "$github_app_id" ];               then echo "export GITHUB_APP_ID='$github_app_id'"; fi
-      if [ -n "$github_app_installation_id" ];  then echo "export GITHUB_APP_INSTALLATION_ID='$github_app_installation_id'"; fi
+      echo "# Source: schema-iterator (Track 4 Phase 1, coo-memory#871)."
+      # github-pat-vade-coo
+      if [ -n "${GITHUB_MCP_PAT:-}" ]; then echo "export GITHUB_MCP_PAT='${GITHUB_MCP_PAT}'"; fi
+      if [ -n "${GITHUB_TOKEN:-}" ];    then echo "export GITHUB_TOKEN='${GITHUB_TOKEN}'"; fi
+      # github-pat-classic-public
+      if [ -n "${GITHUB_PUBLIC_PAT:-}" ]; then echo "export GITHUB_PUBLIC_PAT='${GITHUB_PUBLIC_PAT}'"; fi
+      # agentmail-api-vade-coo
+      if [ -n "${AGENTMAIL_API_KEY:-}" ]; then echo "export AGENTMAIL_API_KEY='${AGENTMAIL_API_KEY}'"; fi
+      # mem0-api-vade-coo
+      if [ -n "${MEM0_API_KEY:-}" ]; then echo "export MEM0_API_KEY='${MEM0_API_KEY}'"; fi
+      # r2-transcripts
+      if [ -n "${R2_TRANSCRIPTS_ACCESS_KEY_ID:-}" ];     then echo "export R2_TRANSCRIPTS_ACCESS_KEY_ID='${R2_TRANSCRIPTS_ACCESS_KEY_ID}'"; fi
+      if [ -n "${R2_TRANSCRIPTS_SECRET_ACCESS_KEY:-}" ]; then echo "export R2_TRANSCRIPTS_SECRET_ACCESS_KEY='${R2_TRANSCRIPTS_SECRET_ACCESS_KEY}'"; fi
+      # transcripts-age-key (Class IV: do not rotate; fetched normally)
+      if [ -n "${TRANSCRIPTS_AGE_IDENTITY:-}" ]; then echo "export TRANSCRIPTS_AGE_IDENTITY='${TRANSCRIPTS_AGE_IDENTITY}'"; fi
+      # cloudflare-api-vade-coo
+      if [ -n "${CLOUDFLARE_API_TOKEN:-}" ];   then echo "export CLOUDFLARE_API_TOKEN='${CLOUDFLARE_API_TOKEN}'"; fi
+      if [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ];  then echo "export CLOUDFLARE_ACCOUNT_ID='${CLOUDFLARE_ACCOUNT_ID}'"; fi
+      # github-app-vade-coo-app (public IDs + private key kept in env for gh-app-token.sh)
+      if [ -n "${GITHUB_APP_ID:-}" ];              then echo "export GITHUB_APP_ID='${GITHUB_APP_ID}'"; fi
+      if [ -n "${GITHUB_APP_INSTALLATION_ID:-}" ]; then echo "export GITHUB_APP_INSTALLATION_ID='${GITHUB_APP_INSTALLATION_ID}'"; fi
+      # vade-canvas-mcp-bearer (status uncertain per schema; best-effort)
+      if [ -n "${VADE_AUTH_TOKEN:-}" ]; then echo "export VADE_AUTH_TOKEN='${VADE_AUTH_TOKEN}'"; fi
+      if [ -n "${VADE_BEARER_TOKEN:-}" ]; then echo "export VADE_BEARER_TOKEN='${VADE_BEARER_TOKEN}'"; fi
+      if [ -n "${VADE_MCP_URL:-}" ];    then echo "export VADE_MCP_URL='${VADE_MCP_URL}'"; fi
     } > "$env_file"
   )
   chmod 600 "$env_file"
-  log "  wrote $env_file (0600)"
+  log "  wrote $env_file (0600, SCHEMA_FETCH_GOT=${SCHEMA_FETCH_GOT})"
 
-  # Export to current shell so validate_coo_identity (which reads
-  # $GITHUB_MCP_PAT) sees the freshly-fetched PAT. settings.json mutation
-  # happens later in merge_coo_settings_env, only after validation
-  # passes — see #66 (env-merge-before-validate). Same `if/then` form
-  # as the heredoc above for the same set-e reason.
-  if [ -n "$github_pat" ];           then export GITHUB_MCP_PAT="$github_pat" GITHUB_TOKEN="$github_pat"; fi
-  if [ -n "$github_public_pat" ];    then export GITHUB_PUBLIC_PAT="$github_public_pat"; fi
-  if [ -n "$agentmail_key" ];        then export AGENTMAIL_API_KEY="$agentmail_key"; fi
-  if [ -n "$mem0_key" ];             then export MEM0_API_KEY="$mem0_key"; fi
-  if [ -n "$r2_access_key_id" ];     then export R2_TRANSCRIPTS_ACCESS_KEY_ID="$r2_access_key_id"; fi
-  if [ -n "$r2_secret_access_key" ]; then export R2_TRANSCRIPTS_SECRET_ACCESS_KEY="$r2_secret_access_key"; fi
-  if [ -n "$age_identity" ];         then export TRANSCRIPTS_AGE_IDENTITY="$age_identity"; fi
-  if [ -n "$vade_auth_token" ];      then export VADE_AUTH_TOKEN="$vade_auth_token"; fi
-  if [ -n "$cloudflare_api_token" ]; then export CLOUDFLARE_API_TOKEN="$cloudflare_api_token"; fi
-  if [ -n "$cloudflare_account_id" ]; then export CLOUDFLARE_ACCOUNT_ID="$cloudflare_account_id"; fi
-  if [ -n "$github_app_id" ];                then export GITHUB_APP_ID="$github_app_id"; fi
-  if [ -n "$github_app_installation_id" ];   then export GITHUB_APP_INSTALLATION_ID="$github_app_installation_id"; fi
+  # vars already exported to current shell by eval above.
+  # Mirror GITHUB_TOKEN = GITHUB_MCP_PAT if the helper didn't emit it
+  # separately (schema alias: both are listed under github-pat-vade-coo,
+  # but the helper emits each alias separately so they should both be set).
+  if [ -n "${GITHUB_MCP_PAT:-}" ] && [ -z "${GITHUB_TOKEN:-}" ]; then
+    export GITHUB_TOKEN="${GITHUB_MCP_PAT}"
+  fi
+
   return 0
 }
 
