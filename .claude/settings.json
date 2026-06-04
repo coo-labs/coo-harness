@@ -112,6 +112,10 @@
           {
             "type": "command",
             "command": "bash \"$VADE_RUNTIME_DIR/scripts/hooks/agent-model-guard.sh\""
+          },
+          {
+            "type": "command",
+            "command": "bash \"$VADE_RUNTIME_DIR/scripts/hooks/preuse-agent-env-scrub.sh\""
           }
         ]
       },
@@ -153,6 +157,10 @@
           {
             "type": "command",
             "command": "bash \"$VADE_RUNTIME_DIR/scripts/hooks/git-push-workflow-scope-guard.sh\""
+          },
+          {
+            "type": "command",
+            "command": "bash \"$VADE_RUNTIME_DIR/scripts/hooks/postuse-bash-redactor.sh\""
           }
         ]
       }
