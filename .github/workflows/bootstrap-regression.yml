@@ -153,15 +153,11 @@ jobs:
           sudo chmod +x /usr/local/bin/yq
 
       - name: Integrity group S — secrets-schema invariants (coo-memory#871)
-        env:
-          VADE_COO_MEMORY_DIR: ${{ github.workspace }}/coo-memory-clone
         run: |
           # jsonschema for the S1 validator path. PyYAML already
-          # installed in the prior step's chain.
+          # installed in the prior step's chain. Validator + JSON
+          # Schema live under scripts/ci/fixtures/ (synced from
+          # coo-memory's Track 1a; sync convention noted in the
+          # test runner's _stage_memory fallback).
           pip install --quiet jsonschema pyyaml
-          # Clone coo-memory at HEAD so the test runner can stage the
-          # live Track 1a validator + JSON Schema into per-test dirs.
-          # Shallow clone — only the working tree is needed.
-          git clone --depth=1 https://github.com/coo-labs/coo-memory \
-            "$VADE_COO_MEMORY_DIR"
           bash "$GITHUB_WORKSPACE/scripts/ci/test-integrity-group-s.sh"
