@@ -67,6 +67,88 @@ SESSION_URL=""
 # `public_repo` scope, provisioned for writes to public repos outside
 # coo-labs/* (anthropics/claude-code, upstream skill repos, etc).
 #
+# Phase 2 (coo-memory#873) retired settings.json::env secrets, so neither
+# GITHUB_MCP_PAT nor GITHUB_PUBLIC_PAT is present in Bash-tool subprocesses
+# by default. _resolve_pat materializes the PAT at call-time via op-read
+# (extending Phase 2's MCP-via-op-run model to the Bash-tool surface) and
+# caches the result in tmpfs to avoid saturating the 1P SA-token rate
+# limit on multi-call sessions.
+#
+# Cache: $XDG_RUNTIME_DIR/coo-gh-pat-cache/<NAME> (0600), with a sibling
+# <NAME>.expiry file holding the unix-time expiry stamp. Tmpfs is in-
+# memory, container-ephemeral, dies on container reboot — within the
+# spirit of Phase 2's "no plaintext at rest" (no disk persistence, no
+# backup surface). TTL is generous (5 min) since PAT rotation runs
+# daily; cache is for amortizing op-read latency + rate-limit pressure,
+# not for freshness control. On op rate-limit or unavailability, stale
+# cache is used as graceful degradation.
+#
+# Cost model:
+#  - env var set (legacy session)        → 0 op-read, env passthrough
+#  - cache hit (within TTL)              → 0 op-read, tmpfs read (~µs)
+#  - cache miss (TTL expired or absent)  → 1 op-read (~50-200ms), write cache
+#  - op rate-limited + stale cache       → 0 op-read, stale tmpfs read
+#  - op rate-limited + no stale cache    → empty PAT, gh fails through
+_resolve_pat() {
+  local name="$1" op_path=""
+  case "$name" in
+    MCP)
+      if [ -n "${GITHUB_MCP_PAT:-}" ]; then
+        printf '%s' "$GITHUB_MCP_PAT"
+        return 0
+      fi
+      op_path="op://COO/vade-coo-self-2026-04/token"
+      ;;
+    PUBLIC)
+      if [ -n "${GITHUB_PUBLIC_PAT:-}" ]; then
+        printf '%s' "$GITHUB_PUBLIC_PAT"
+        return 0
+      fi
+      op_path="op://COO/GITHUB_PUBLIC_PAT/token"
+      ;;
+    *) return 0 ;;
+  esac
+
+  local cache_dir="${XDG_RUNTIME_DIR:-/tmp}/coo-gh-pat-cache"
+  local cache_file="$cache_dir/$name"
+  local expiry_file="$cache_dir/$name.expiry"
+  local ttl=300
+  local now; now="$(date +%s 2>/dev/null || echo 0)"
+
+  # Cache hit if both files present and not expired.
+  if [ -f "$cache_file" ] && [ -f "$expiry_file" ]; then
+    local expiry="0"
+    expiry="$(cat "$expiry_file" 2>/dev/null || echo 0)"
+    if [ "${expiry:-0}" -gt "$now" ] 2>/dev/null; then
+      cat "$cache_file"
+      return 0
+    fi
+  fi
+
+  # Cache miss / expired: resolve via op.
+  if command -v op >/dev/null 2>&1 && [ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]; then
+    local val=""
+    val="$(op read "$op_path" 2>/dev/null || true)"
+    if [ -n "$val" ]; then
+      mkdir -p "$cache_dir" 2>/dev/null || true
+      chmod 0700 "$cache_dir" 2>/dev/null || true
+      local umask_save; umask_save="$(umask)"
+      umask 0177
+      printf '%s' "$val" > "$cache_file" 2>/dev/null || true
+      printf '%s' "$((now + ttl))" > "$expiry_file" 2>/dev/null || true
+      umask "$umask_save"
+      printf '%s' "$val"
+      return 0
+    fi
+  fi
+
+  # Op unavailable or rate-limited: fall back to stale cache if any.
+  if [ -f "$cache_file" ]; then
+    cat "$cache_file"
+  fi
+  return 0
+}
+
 # Routing: if any covered surface in argv names an owner != coo-labs
 # AND $GITHUB_PUBLIC_PAT is set, swap GH_TOKEN to the public PAT for
 # this invocation. coo-labs/* and unrecognized-shape invocations pass
@@ -436,11 +518,24 @@ if [ -n "${GITHUB_APP_ID:-}" ] && { [ "${GH_USE_APP_TOKEN:-0}" = "1" ] || is_org
     echo "gh-coo-wrap: WARN: minter not found at $minter; org-admin path will use default auth." >&2
   fi
 else
+  # No App-token route fired. Routing precedence:
+  #  - Cross-org: always swap to PUBLIC PAT (preserves pre-Phase-2 behavior
+  #    that auto-corrects a caller-set GH_TOKEN for the public surface).
+  #  - coo-labs/*: only materialize MCP PAT if GH_TOKEN is unset (preserves
+  #    caller-set GH_TOKEN; in legacy sessions this is the env-inherited PAT,
+  #    in post-Phase-2 sessions GH_TOKEN is unset so the op-read fallback fires).
   target_owner="$(extract_owner "$@")"
-  [ -z "$target_owner" ] && target_owner="$(extract_owner_positional "$@")"
-  if [ -n "$target_owner" ] && [ "$target_owner" != "coo-labs" ] && [ -n "${GITHUB_PUBLIC_PAT:-}" ]; then
-    export GH_TOKEN="$GITHUB_PUBLIC_PAT"
+  if [ -z "$target_owner" ]; then
+    target_owner="$(extract_owner_positional "$@")"
   fi
+  if [ -n "$target_owner" ] && [ "$target_owner" != "coo-labs" ]; then
+    _pat="$(_resolve_pat PUBLIC)"
+    if [ -n "$_pat" ]; then export GH_TOKEN="$_pat"; fi
+  elif [ -z "${GH_TOKEN:-}" ]; then
+    _pat="$(_resolve_pat MCP)"
+    if [ -n "$_pat" ]; then export GH_TOKEN="$_pat"; fi
+  fi
+  unset _pat || true
 fi
 
 # Resolve issue/PR shape-check script. Advisory only; missing-tolerant.

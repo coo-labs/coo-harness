@@ -504,6 +504,115 @@ assert_contains "gh -R ... pr checks: App token" "$out" "GH_TOKEN=APP_TOKEN_TEST
 out="$("$WRAPPER" pr view 1154)"
 assert_contains "gh pr view: stays on MCP_PAT" "$out" "GH_TOKEN=MCP_PAT_TESTING"
 
+# ============================================================
+# PAT materialization cache tests (Phase 2 follow-up)
+# ============================================================
+# When GITHUB_MCP_PAT / GITHUB_PUBLIC_PAT are not set in env, the
+# wrapper falls back to `op read` and caches the result in tmpfs.
+# These tests stub `op` on PATH to control the materialization
+# path and assert cache file shape, hit/miss behavior, expiry, and
+# rate-limit fallback.
+
+printf '\nPAT materialization cache tests:\n'
+
+# Clean cache + unset env-var PATs for this test block.
+CACHE_DIR="$WORK/runtime/coo-gh-pat-cache"
+rm -rf "$WORK/runtime"
+mkdir -p "$WORK/op-stub-bin"
+
+# Stub `op` on PATH. Reads command from argv; returns canned PAT on
+# `op read op://...`; returns a fake whoami; honors a kill-switch file
+# at $WORK/op-fail-flag to simulate rate-limit / unavailability.
+cat > "$WORK/op-stub-bin/op" <<'EOF'
+#!/usr/bin/env bash
+if [ -f "$OP_STUB_FAIL_FLAG" ]; then
+  echo "[ERROR] Too many requests. Your client has been rate-limited." >&2
+  exit 1
+fi
+case "${1:-}" in
+  read)
+    case "${2:-}" in
+      "op://COO/vade-coo-self-2026-04/token") echo "OPRESOLVED_MCP_PAT_FROM_STUB" ;;
+      "op://COO/GITHUB_PUBLIC_PAT/token")     echo "OPRESOLVED_PUBLIC_PAT_FROM_STUB" ;;
+      *) echo "[mock op] unknown ref: ${2:-}" >&2; exit 2 ;;
+    esac
+    ;;
+  whoami) echo "ServiceAccount: stub" ;;
+  *) echo "[mock op] unhandled: $*" >&2; exit 2 ;;
+esac
+EOF
+chmod +x "$WORK/op-stub-bin/op"
+
+# Sub-environment that all cache tests run inside.
+_cache_test_env() {
+  env -u GITHUB_MCP_PAT -u GITHUB_PUBLIC_PAT -u GH_TOKEN \
+      PATH="$WORK/op-stub-bin:$PATH" \
+      XDG_RUNTIME_DIR="$WORK/runtime" \
+      OP_SERVICE_ACCOUNT_TOKEN="stub_sa_token" \
+      OP_STUB_FAIL_FLAG="$WORK/op-fail-flag" \
+      CLAUDE_CODE_REMOTE_SESSION_ID="cse_TESTID123" \
+      COO_GH_REAL="$WORK/gh-real" \
+      "$@"
+}
+
+# --- TEST C1: cache miss, op-resolve, MCP PAT materialized, cache written ---
+rm -rf "$WORK/runtime"; rm -f "$WORK/op-fail-flag"
+out="$(_cache_test_env "$WRAPPER" api repos/coo-labs/foo/issues)"
+assert_contains "cache-miss MCP: GH_TOKEN materialized from op" "$out" "GH_TOKEN=OPRESOLVED_MCP_PAT_FROM_STUB"
+[ -f "$CACHE_DIR/MCP" ] && cache_state="present" || cache_state="absent"
+assert_contains "cache-miss MCP: cache file created" "$cache_state" "present"
+[ -f "$CACHE_DIR/MCP.expiry" ] && expiry_state="present" || expiry_state="absent"
+assert_contains "cache-miss MCP: expiry file created" "$expiry_state" "present"
+file_mode="$(stat -c '%a' "$CACHE_DIR/MCP" 2>/dev/null || stat -f '%Lp' "$CACHE_DIR/MCP" 2>/dev/null)"
+assert_contains "cache-miss MCP: cache file is 0600" "$file_mode" "600"
+
+# --- TEST C2: cache miss, PUBLIC PAT for cross-org ---
+rm -rf "$WORK/runtime"; rm -f "$WORK/op-fail-flag"
+out="$(_cache_test_env "$WRAPPER" api repos/anthropics/claude-code/issues)"
+assert_contains "cache-miss PUBLIC: GH_TOKEN materialized from op (cross-org)" "$out" "GH_TOKEN=OPRESOLVED_PUBLIC_PAT_FROM_STUB"
+[ -f "$CACHE_DIR/PUBLIC" ] && cache_state="present" || cache_state="absent"
+assert_contains "cache-miss PUBLIC: cache file created" "$cache_state" "present"
+
+# --- TEST C3: cache hit — second call doesn't invoke op ---
+# Pre-populate cache with a sentinel value; flip op-fail flag so any
+# op call would error. If the cache is honored, the sentinel comes
+# through; otherwise op-fail aborts and GH_TOKEN is empty.
+rm -rf "$WORK/runtime"; mkdir -p "$CACHE_DIR"
+printf '%s' "CACHED_HIT_MCP_PAT" > "$CACHE_DIR/MCP"
+printf '%s' "$(($(date +%s) + 600))" > "$CACHE_DIR/MCP.expiry"
+chmod 0600 "$CACHE_DIR/MCP"
+touch "$WORK/op-fail-flag"  # any op call would now fail
+out="$(_cache_test_env "$WRAPPER" api repos/coo-labs/foo/issues)"
+assert_contains "cache-hit MCP: served from cache, op not invoked" "$out" "GH_TOKEN=CACHED_HIT_MCP_PAT"
+
+# --- TEST C4: cache expired — op IS re-invoked ---
+rm -rf "$WORK/runtime"; mkdir -p "$CACHE_DIR"; rm -f "$WORK/op-fail-flag"
+printf '%s' "STALE_CACHED_VALUE" > "$CACHE_DIR/MCP"
+printf '%s' "$(($(date +%s) - 600))" > "$CACHE_DIR/MCP.expiry"  # expired 10 min ago
+chmod 0600 "$CACHE_DIR/MCP"
+out="$(_cache_test_env "$WRAPPER" api repos/coo-labs/foo/issues)"
+assert_contains "cache-expired MCP: re-resolved via op" "$out" "GH_TOKEN=OPRESOLVED_MCP_PAT_FROM_STUB"
+
+# --- TEST C5: op rate-limited + stale cache present → stale value used ---
+rm -rf "$WORK/runtime"; mkdir -p "$CACHE_DIR"
+printf '%s' "STALE_CACHED_FALLBACK_VALUE" > "$CACHE_DIR/MCP"
+printf '%s' "$(($(date +%s) - 600))" > "$CACHE_DIR/MCP.expiry"
+chmod 0600 "$CACHE_DIR/MCP"
+touch "$WORK/op-fail-flag"
+out="$(_cache_test_env "$WRAPPER" api repos/coo-labs/foo/issues)"
+assert_contains "op rate-limited + stale cache: serves stale" "$out" "GH_TOKEN=STALE_CACHED_FALLBACK_VALUE"
+
+# --- TEST C6: env GITHUB_MCP_PAT set → bypass cache entirely ---
+rm -rf "$WORK/runtime"; rm -f "$WORK/op-fail-flag"
+out="$(env -u GH_TOKEN GITHUB_MCP_PAT="ENV_MCP_PAT" \
+       PATH="$WORK/op-stub-bin:$PATH" XDG_RUNTIME_DIR="$WORK/runtime" \
+       OP_SERVICE_ACCOUNT_TOKEN="stub_sa_token" OP_STUB_FAIL_FLAG="$WORK/op-fail-flag" \
+       CLAUDE_CODE_REMOTE_SESSION_ID="cse_TESTID123" COO_GH_REAL="$WORK/gh-real" \
+       "$WRAPPER" api repos/coo-labs/foo/issues)"
+assert_contains "env MCP set: bypasses cache + op" "$out" "GH_TOKEN=ENV_MCP_PAT"
+[ ! -f "$CACHE_DIR/MCP" ] && cache_state="absent" || cache_state="present"
+assert_contains "env MCP set: cache file NOT created" "$cache_state" "absent"
+
 printf '\n'
 printf 'Total: %d pass, %d fail\n' "$PASS" "$FAIL"
 if [ "$FAIL" -gt 0 ]; then
