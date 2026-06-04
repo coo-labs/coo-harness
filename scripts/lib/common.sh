@@ -1524,6 +1524,93 @@ merge_coo_settings_paths() {
   _write_claude_settings_paths "$VADE_CLOUD_STATE_DIR" "$bindir"
 }
 
+# Pre-materialize MCP env-file templates to tmpfs, replacing op:// refs
+# with the already-fetched values in the current process env. Called
+# AFTER fetch_coo_secrets so $MEM0_API_KEY etc. are populated.
+#
+# Phase 2 follow-up to coo-memory#871: the per-MCP-spawn `op run --env-file`
+# pattern resolves every op:// ref on each spawn, hitting 1P's account-level
+# rate-limit (1000 read+write per 24h on Personal/Teams plans, undocumented).
+# MCP servers respawn under disconnect/reconnect, sub-agent spawns, and
+# stale-PAT re-bootstraps — compounding. Pre-materializing the resolved
+# env-file once at boot means subsequent `op run` invocations see a file
+# with no op:// refs and pass through without API calls.
+#
+# Output: $VADE_MCP_ENV_DIR/<basename>.env (one per template). The directory
+# is tmpfs (/dev/shm on Linux containers), 0700, files 0600 — within Phase 2's
+# "no plaintext at rest" spirit: in-memory, container-ephemeral, dies on reboot,
+# no backup surface. Same security posture as MCP server in-process secret residence.
+#
+# Idempotent: re-running on stale-PAT-detected re-bootstrap simply re-writes
+# the resolved files.
+materialize_mcp_env_files() {
+  local templates_dir="${VADE_RUNTIME_DIR:-/home/user/coo-harness}/scripts/lib/mcp-env-templates"
+  if [ ! -d "$templates_dir" ]; then
+    log "  materialize_mcp_env_files: templates dir absent at $templates_dir; skip"
+    return 0
+  fi
+
+  # Pick tmpfs target: /dev/shm preferred (typical Linux container tmpfs),
+  # fall back to /tmp. Both are container-ephemeral.
+  local out_dir
+  if [ -d /dev/shm ] && [ -w /dev/shm ]; then
+    out_dir="/dev/shm/coo-mcp-env"
+  else
+    out_dir="/tmp/coo-mcp-env"
+  fi
+
+  mkdir -p "$out_dir" 2>/dev/null || true
+  chmod 0700 "$out_dir" 2>/dev/null || true
+
+  local count=0 missing=0
+  local umask_save; umask_save="$(umask)"
+  umask 0177
+
+  local template
+  for template in "$templates_dir"/*.env; do
+    [ -f "$template" ] || continue
+    local basename="${template##*/}"
+    local out_file="$out_dir/$basename"
+
+    {
+      local line key resolved
+      while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+          \#*|"")
+            printf '%s\n' "$line"
+            ;;
+          *=op://*)
+            key="${line%%=*}"
+            resolved="${!key:-}"
+            if [ -n "$resolved" ]; then
+              printf '%s=%s\n' "$key" "$resolved"
+            else
+              # Resolution missing — keep the op:// ref so `op run` either
+              # resolves it at spawn (fallback) or fails loudly (visible gap).
+              printf '%s\n' "$line"
+              missing=$((missing + 1))
+            fi
+            ;;
+          *)
+            printf '%s\n' "$line"
+            ;;
+        esac
+      done < "$template"
+    } > "$out_file"
+
+    count=$((count + 1))
+  done
+
+  umask "$umask_save"
+
+  export VADE_MCP_ENV_DIR="$out_dir"
+  if [ "$missing" -gt 0 ]; then
+    log "  materialized $count MCP env file(s) to $out_dir ($missing op:// ref(s) unresolved — will fall back to op run)"
+  else
+    log "  materialized $count MCP env file(s) to $out_dir (all op:// refs pre-resolved)"
+  fi
+}
+
 # Write non-secret COO identifier vars into ~/.claude/settings.json "env".
 # Phase 2 (coo-memory#873): secrets removed from settings.json entirely.
 # Only public identifiers (GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID,
