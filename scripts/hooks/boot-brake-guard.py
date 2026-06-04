@@ -705,14 +705,29 @@ def main():
         or sentinel.get("state") == "PENDING"
     )
 
-    # Backpressure cap: don't re-validate more than once per second.
+    # Backpressure cap: don't re-validate more than once per second —
+    # EXCEPT when the current tool is a Read against a cached FAIL whose
+    # failures include any read_observed entry. That's the "Read might
+    # have just satisfied a gate" case (coo-memory#1168 soak-fix: parallel
+    # boot Reads that close identity-stack gates would otherwise honor a
+    # cached FAIL through the entire ~2s parallel batch and not transition
+    # to OK until something else fires the guard).
     backpressure_floor = 1.0
     now_epoch = time.time()
     manifest_loaded = None  # cache across cached-check + revalidate branches
     m_err_cached = None
+    read_observed_failure_cached = (
+        tool_name == "Read"
+        and sentinel is not None
+        and sentinel.get("state") == "FAIL"
+        and any(
+            "consumed" in str(f.get("deliverable", ""))
+            for f in sentinel.get("failures", [])
+        )
+    )
     if sentinel and not needs_revalidation:
         last = sentinel.get("checked_at_epoch", 0)
-        if now_epoch - last < backpressure_floor:
+        if now_epoch - last < backpressure_floor and not read_observed_failure_cached:
             pass  # honor the cache
         else:
             # Content-hash drift check
@@ -915,15 +930,21 @@ def main():
     if state == "OK":
         sys.exit(0)
 
-    # FAIL / PENDING in warn mode → allow but log. Tag distinctly so
-    # the Phase 1 aggregator's would-have-denied histogram isn't
-    # polluted by race-gate transients:
-    #   - state=FAIL   → cause=would_have_denied (real denial in block)
-    #   - state=PENDING → cause=race_gate_observed (block-on-FAIL would
-    #     have allowed; block-strict would have denied)
+    # FAIL / PENDING in warn mode → allow but log. Tag each event with
+    # the same outcome that block mode would emit, so warn-mode is a
+    # faithful preview of block-mode (and the soak signal isn't polluted
+    # by tools that block mode would have whitelisted):
+    #   - state=PENDING                            → race_gate_observed
+    #     (block-on-FAIL allows; only block-strict denies)
+    #   - state=FAIL + tool in WHITELIST_TOOLS     → whitelisted_in_fail
+    #     (block-on-FAIL would log this same cause; coo-memory#1168 follow-up)
+    #   - state=FAIL + tool not whitelisted        → would_have_denied
+    #     (the real soak signal: actions block-on-FAIL would refuse)
     if mode == "warn":
         if state == "PENDING":
             cause = "race_gate_observed"
+        elif tool_name in WHITELIST_TOOLS:
+            cause = "whitelisted_in_fail"
         else:
             cause = "would_have_denied"
         append_event(state_dir, {

@@ -644,6 +644,75 @@ else
   _fail "override_invalidated not logged: $(cat "$state_dir/brake-events.jsonl" 2>/dev/null)"
 fi
 
+# ─── Test 23 (NEW): warn-mode mirrors block-mode for whitelisted tools ─
+echo "Test 23 — warn-mode taxonomy mirrors block-mode (coo-memory#1168 soak-fix)"
+set -- $(echo "$(_setup_session_dirs "t23")" | tr '|' ' ')
+state_dir="$1"; home_dir="$2"
+# Deliverables missing → state will land FAIL. Read is whitelisted in
+# block-on-FAIL, so warn-mode must classify it as whitelisted_in_fail,
+# not would_have_denied. Same for Glob / AskUserQuestion / TodoWrite.
+for tool in Read Grep Glob AskUserQuestion TodoWrite; do
+  arg=""
+  [ "$tool" = "Read" ] && arg="/etc/hostname"
+  [ "$tool" = "Grep" ] && arg="pattern"
+  _invoke_guard t23 "$tool" warn "$state_dir" "$home_dir" "$arg" > /dev/null
+  sleep 1.1  # past backpressure cap so each call re-validates cleanly
+done
+# Bash is not whitelisted → must classify as would_have_denied.
+_invoke_guard t23 Bash warn "$state_dir" "$home_dir" "ls" > /dev/null
+wic="$(grep -c '"cause":"whitelisted_in_fail"' "$state_dir/brake-events.jsonl" 2>/dev/null || echo 0)"
+wdc="$(grep -c '"cause":"would_have_denied"' "$state_dir/brake-events.jsonl" 2>/dev/null || echo 0)"
+if [ "$wic" -ge 5 ] && [ "$wdc" -ge 1 ]; then
+  _pass "warn-mode: $wic whitelisted_in_fail (Read/Grep/Glob/AUQ/TodoWrite), $wdc would_have_denied (Bash)"
+else
+  _fail "warn-mode misclassified (whitelisted_in_fail=$wic, would_have_denied=$wdc); events: $(cat "$state_dir/brake-events.jsonl")"
+fi
+
+# ─── Test 24 (NEW): Read bypasses backpressure on FAIL with read_observed ─
+echo "Test 24 — Read against cached FAIL with read_observed bypasses backpressure (coo-memory#1168 soak-fix)"
+set -- $(echo "$(_setup_session_dirs "t24")" | tr '|' ' ')
+state_dir="$1"; home_dir="$2"
+# Stage file deliverables + 1 of 4 identity reads → FAIL on remaining 3.
+_make_all_deliverables_present "$state_dir" "$home_dir"
+ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+printf '%s\t%s/identity/charter.md\n' "$ts" "$COO_MEMORY_DIR" \
+  >> "$home_dir/.vade/session-reads.t24.log"
+# First fire → sentinel FAIL (charter satisfied, 3 *_consumed unsatisfied)
+_invoke_guard t24 Bash warn "$state_dir" "$home_dir" "ls" > /dev/null
+state_before="$(python3 -c "import json; print(json.load(open('$state_dir/boot-brake.t24.json'))['state'])")"
+if [ "$state_before" != "FAIL" ]; then
+  _fail "Test 24 precondition: expected FAIL after 1-of-4 identity read, got $state_before"
+fi
+# Within 1s (backpressure window), satisfy the other 3 via Reads and
+# fire the guard for each. Without the bypass, the cached FAIL would
+# survive all three Reads. With the bypass, the brake re-validates and
+# transitions FAIL → OK by the last Read.
+for f in governance preferences episodic_memory; do
+  printf '%s\t%s/identity/%s.md\n' "$ts" "$COO_MEMORY_DIR" "$f" \
+    >> "$home_dir/.vade/session-reads.t24.log"
+  _invoke_guard t24 Read warn "$state_dir" "$home_dir" "$COO_MEMORY_DIR/identity/$f.md" > /dev/null
+done
+state_after="$(python3 -c "import json; print(json.load(open('$state_dir/boot-brake.t24.json'))['state'])")"
+if [ "$state_after" = "OK" ]; then
+  _pass "Read in FAIL re-validates within backpressure window → FAIL→OK"
+else
+  _fail "Cached FAIL survived satisfying Reads (state=$state_after); backpressure bypass not effective"
+fi
+# Sanity: a non-Read tool with no satisfying read does NOT bypass — the
+# bypass is targeted to the gate-closing case, not a general escape hatch.
+set -- $(echo "$(_setup_session_dirs "t24b")" | tr '|' ' ')
+state_dir="$1"; home_dir="$2"
+_make_all_deliverables_present "$state_dir" "$home_dir"
+_invoke_guard t24b Bash warn "$state_dir" "$home_dir" "ls" > /dev/null
+checked_at_1="$(python3 -c "import json; print(json.load(open('$state_dir/boot-brake.t24b.json'))['checked_at_epoch'])")"
+_invoke_guard t24b Bash warn "$state_dir" "$home_dir" "ls" > /dev/null
+checked_at_2="$(python3 -c "import json; print(json.load(open('$state_dir/boot-brake.t24b.json'))['checked_at_epoch'])")"
+if [ "$checked_at_1" = "$checked_at_2" ]; then
+  _pass "Non-Read within backpressure window does not re-validate (bypass is targeted)"
+else
+  _fail "Non-Read also bypassed backpressure (over-broad bypass; checked_at changed)"
+fi
+
 # ─── Summary ────────────────────────────────────────────────────
 echo
 echo "===================================="
