@@ -129,7 +129,7 @@ s_check_S2() {
     | select(.status != "dormant")
     | . as $c
     | (.env_aliases // [])[]
-    | "\($c.id)|\($c.status)|\(.)"' "$schema" 2>/dev/null)" || rows=""
+    | ($c.id + "|" + $c.status + "|" + .)' "$schema" 2>/dev/null)" || rows=""
 
   if [ -z "$rows" ]; then
     _add S2 true "no non-dormant env-aliases declared"
@@ -175,7 +175,7 @@ s_check_S3() {
     | select(.status != "dormant")
     | . as $c
     | (.mirrors // [])[]
-    | "\($c.id)|\(.surface)|\(.path_or_name)|\(.format // "TBD")|\($c.op_item)|\($c.op_field)"' "$schema" 2>/dev/null)" || rows=""
+    | ($c.id + "|" + .surface + "|" + .path_or_name + "|" + (.format // "TBD") + "|" + $c.op_item + "|" + $c.op_field)' "$schema" 2>/dev/null)" || rows=""
 
   if [ -z "$rows" ]; then
     _add S3 true "no non-dormant mirrors declared"
@@ -382,7 +382,7 @@ s_check_S4() {
     | select(.status != "dormant")
     | select(.op_field != "credential")
     | select((.op_alt_fields // []) | length > 0)
-    | "\(.id)|\(.op_item)"' "$schema" 2>/dev/null)" || rows=""
+    | (.id + "|" + .op_item)' "$schema" 2>/dev/null)" || rows=""
 
   if [ -z "$rows" ]; then
     _add S4 true "no multi-field credentials to check"
@@ -532,7 +532,7 @@ s_check_S7() {
   cred_rows="$(yq -r '
     .credentials[]
     | select(.status != "dormant")
-    | "\(.id)|\(.op_item)|\(.op_field)"' "$schema" 2>/dev/null)" || cred_rows=""
+    | (.id + "|" + .op_item + "|" + .op_field)' "$schema" 2>/dev/null)" || cred_rows=""
 
   if [ -z "$cred_rows" ]; then
     _add S7 skip "no readable credentials in schema"
@@ -561,7 +561,7 @@ s_check_S7() {
 
   # Collect every regex from secret_shapes, paired with its name.
   local pat_rows
-  pat_rows="$(yq -r '.secret_shapes[] | "\(.name)|\(.pattern)"' "$schema" 2>/dev/null)" || pat_rows=""
+  pat_rows="$(yq -r '.secret_shapes[] | (.name + "|" + .pattern)' "$schema" 2>/dev/null)" || pat_rows=""
 
   # Direction 1: orphan regex — for every pattern, ≥1 credential value
   # must match. A pattern with zero matches is "orphan".
