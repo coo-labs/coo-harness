@@ -59,6 +59,20 @@ jobs:
   bridge:
     runs-on: ubuntu-latest
     steps:
+      # Track 5 (coo-labs/coo-memory#871): load VADE_FIELDS_ADMIN_PAT from 1Password,
+      # eliminating the org-secret mirror for this workflow.
+      # PREREQUISITE: OP_SERVICE_ACCOUNT_TOKEN org-level secret must be set.
+      # Until provisioned, this step no-ops and the secrets.VADE_FIELDS_ADMIN_PAT
+      # caller-passed secret remains the active path.
+      - name: Load secrets from 1Password (Track 5 migration)
+        if: ${{ env.OP_SERVICE_ACCOUNT_TOKEN != '' }}
+        uses: 1password/load-secrets-action@v2
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          VADE_FIELDS_ADMIN_PAT: op://COO/vade-coo-self-2026-04/token
+        with:
+          export-env: true
+
       - name: Checkout coo-harness (script source)
         uses: actions/checkout@v4
         with:
@@ -67,7 +81,7 @@ jobs:
 
       - name: Run bridge
         env:
-          GH_TOKEN: ${{ secrets.VADE_FIELDS_ADMIN_PAT }}
+          GH_TOKEN: ${{ env.VADE_FIELDS_ADMIN_PAT || secrets.VADE_FIELDS_ADMIN_PAT }}
           REPO_FULL_NAME: ${{ inputs.repo-full-name }}
           ISSUE_NUMBER: ${{ inputs.issue-number }}
           DRY_RUN: ${{ inputs.dry-run && '1' || '0' }}
