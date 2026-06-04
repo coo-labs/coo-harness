@@ -213,6 +213,20 @@
       "notes": "vade-canvas MCP bearer (coo-labs/vade-canvas#93). Opaque shape — bearer is operator-chosen (typically random hex >= 32 chars), so kv-anchored to its env-var name. The entropy fallback also catches it as defense-in-depth."
     },
     {
+      "id": "vade-bearer-token",
+      "regex": "(?i)(VADE_BEARER_TOKEN\\s*[=:]\\s*['\"]?)[A-Za-z0-9_\\-+/=]{16,}",
+      "replacement": "\\g<1>[REDACTED:vade-bearer-token]",
+      "secret_var": "VADE_BEARER_TOKEN",
+      "notes": "vade-canvas MCP bearer alternate alias (sibling to VADE_AUTH_TOKEN under schema.yaml's vade-canvas-mcp-bearer entry). Same opaque-bearer shape — kv-anchored to its env-var name. Track 4 schema-iterator surfaced this alias to fetch_coo_secrets's static export set."
+    },
+    {
+      "id": "vade-mcp-url",
+      "regex": "(?i)(VADE_MCP_URL\\s*[=:]\\s*['\"]?)[A-Za-z0-9_\\-+/:.?&=]{8,}",
+      "replacement": "\\g<1>[REDACTED:vade-mcp-url]",
+      "secret_var": "VADE_MCP_URL",
+      "notes": "vade-canvas MCP endpoint URL. NOT a secret — public URL — but registered for defense-in-depth and to satisfy the Secret Registration Rule (coo-labs/coo-logs#64) on fetch_coo_secrets's static export set. Co-listed under schema.yaml's vade-canvas-mcp-bearer credential entry. Follow-up: schema entry conflates secret (VADE_BEARER_TOKEN) and config (VADE_MCP_URL); consider splitting in a future cleanup so the iterator can route config-aliases to non_secret_env_allowlist instead of fetch_coo_secrets."
+    },
+    {
       "id": "auth-header",
       "regex": "(?i)(authorization:\\s*(?:bearer|basic|token)\\s+)[A-Za-z0-9._\\-+/=]{20,}",
       "replacement": "\\g<1>[REDACTED:auth-header]",

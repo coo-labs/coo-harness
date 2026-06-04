@@ -25,7 +25,17 @@ case "${1:-}" in
     exit 0
     ;;
   whoami)
-    echo "ServiceAccount: ci-mock-coo-bootstrap"
+    # Track 4 Phase 1: support --format=json for SA identity check.
+    # Return the same ServiceAccount name in both text and JSON forms
+    # so the identity file is written and compared correctly in CI.
+    case "${2:-}" in
+      --format=json|--format)
+        printf '{"ServiceAccount":"ci-mock-coo-bootstrap","URL":"https://ci.mock","UserUUID":"00000000-0000-0000-0000-000000000000"}\n'
+        ;;
+      *)
+        echo "ServiceAccount: ci-mock-coo-bootstrap"
+        ;;
+    esac
     exit 0
     ;;
   read)
@@ -81,6 +91,10 @@ case "${1:-}" in
         ;;
       "op://COO/vade-coo-sign/public key")
         cat "$KEYDIR/vade-coo-sign.pub"
+        ;;
+      "op://COO/cloudflare-api-token-vade-coo/account_id")
+        # Mocked Cloudflare account ID (non-secret public identifier).
+        echo "0000000000000000000000000000cimock"
         ;;
       "op://COO/vade-coo-app/app_id")
         # GitHub App ID (vade-coo-memory#837) — canned numeric for the

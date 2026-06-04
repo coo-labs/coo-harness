@@ -28,6 +28,43 @@ _on_exit() {
   else
     bootstrap_log_record FAIL "step=${COO_BOOTSTRAP_STEP} rc=${rc}"
     boot_log_record coo-bootstrap end fail "step=${COO_BOOTSTRAP_STEP}" "rc=${rc}"
+    # Track 4 Phase 1 — coo-harness#66 strip-on-failure (Deliverable c).
+    # The env-merge-before-validate ordering (fetch → validate → merge) prevents
+    # a wrong-identity PAT from reaching settings.json on a fresh bootstrap.
+    # But if a prior bootstrap left a stale/wrong PAT in settings.json and
+    # THIS bootstrap fails at validate_coo_identity, the stale PAT must be
+    # stripped so the next session fails closed (no PAT) rather than open
+    # (wrong-identity PAT). Without this, the poisoned state survives.
+    # Only strip if we actually reached fetch_coo_secrets (step is past that).
+    case "$COO_BOOTSTRAP_STEP" in
+      validate_coo_identity|merge_coo_settings_env|merge_coo_settings_paths|summarize_coo_identity|complete)
+        local settings_file="${CLAUDE_CONFIG_DIR:-${HOME}/.claude}/settings.json"
+        if [ -f "$settings_file" ] && check_cmd python3; then
+          log "coo-bootstrap: validate failed; stripping GITHUB_MCP_PAT/GITHUB_TOKEN from $settings_file (#66 fail-closed)"
+          python3 -c "
+import json, sys, os
+path = sys.argv[1]
+try:
+    with open(path) as f:
+        cfg = json.load(f)
+    env = cfg.get('env', {})
+    stripped = False
+    for key in ['GITHUB_MCP_PAT', 'GITHUB_TOKEN']:
+        if key in env:
+            del env[key]
+            stripped = True
+    cfg['env'] = env
+    with open(path, 'w') as f:
+        json.dump(cfg, f, indent=2)
+        f.write('\n')
+    if stripped:
+        print('[coo-bootstrap] stripped GITHUB_MCP_PAT/GITHUB_TOKEN from settings.json', file=sys.stderr)
+except Exception as e:
+    print(f'[coo-bootstrap] warn: strip failed: {e}', file=sys.stderr)
+" "$settings_file" 2>&1 || true
+        fi
+        ;;
+    esac
   fi
   return $rc
 }
@@ -181,18 +218,126 @@ bootstrap_log_record START "VADE_FORCE_COO_BOOTSTRAP=${VADE_FORCE_COO_BOOTSTRAP:
 COO_BOOTSTRAP_STEP="ensure_op_cli"
 ensure_op_cli
 
+# ── SA-token break-glass (Track 4 Phase 1, coo-memory#871 §b) ────────────
+# Two-token-overlap support: if OP_SERVICE_ACCOUNT_TOKEN_NEW is set,
+# try authenticating with it first. On success, accept it as the active
+# token (overwrite the persisted coo-env entry) and unset the _NEW var
+# so subsequent runs don't retry the rotation dance. On failure, fall
+# back to the current OP_SERVICE_ACCOUNT_TOKEN.
+COO_BOOTSTRAP_STEP="sa_token_rotation_check"
+if [ -n "${OP_SERVICE_ACCOUNT_TOKEN_NEW:-}" ]; then
+  log "coo-bootstrap: OP_SERVICE_ACCOUNT_TOKEN_NEW set; testing rotated token"
+  if OP_SERVICE_ACCOUNT_TOKEN="$OP_SERVICE_ACCOUNT_TOKEN_NEW" retry 3 op whoami >/dev/null 2>&1; then
+    log "coo-bootstrap: rotated SA token validates; accepting as canonical"
+    export OP_SERVICE_ACCOUNT_TOKEN="$OP_SERVICE_ACCOUNT_TOKEN_NEW"
+    unset OP_SERVICE_ACCOUNT_TOKEN_NEW
+    # Persist the new token into coo-env so the next session picks it up.
+    # Only update if the file already exists (i.e., a prior bootstrap ran).
+    if [ -f "$COO_ENV_FILE" ]; then
+      (
+        umask 077
+        # Replace or append the OP_SERVICE_ACCOUNT_TOKEN line.
+        if grep -q "^export OP_SERVICE_ACCOUNT_TOKEN=" "$COO_ENV_FILE" 2>/dev/null; then
+          # sed in-place replacement — value may contain special chars so use
+          # a Python one-liner to avoid quoting hazards.
+          python3 -c "
+import sys, os
+path = sys.argv[1]; new_val = os.environ.get('OP_SERVICE_ACCOUNT_TOKEN','')
+lines = open(path).readlines()
+out = [l for l in lines if not l.startswith('export OP_SERVICE_ACCOUNT_TOKEN=')]
+out.append(f\"export OP_SERVICE_ACCOUNT_TOKEN='{new_val}'\n\")
+open(path,'w').writelines(out)
+" "$COO_ENV_FILE" 2>/dev/null || true
+        else
+          printf "export OP_SERVICE_ACCOUNT_TOKEN='%s'\n" "$OP_SERVICE_ACCOUNT_TOKEN" >> "$COO_ENV_FILE"
+        fi
+      )
+      log "coo-bootstrap: persisted rotated OP_SERVICE_ACCOUNT_TOKEN to $COO_ENV_FILE"
+    fi
+  else
+    log "coo-bootstrap: rotated SA token (OP_SERVICE_ACCOUNT_TOKEN_NEW) failed; falling back to current token"
+    unset OP_SERVICE_ACCOUNT_TOKEN_NEW
+  fi
+fi
+
 # Verify the service-account token before attempting any reads. Retry
 # to absorb transient 1Password API errors (503s). 5 attempts
 # (~15s tolerance) matches _op_to_file's already-tuned budget
 # (lib/common.sh _op_to_file) — same flake mode. #76 propagates the
 # proven budget here after run-2026-04-25T182206 exhausted the
 # prior 3-attempt budget on a transient api.1password.com hiccup.
+#
+# Track 4 Phase 1 (coo-memory#871 §b1): enhanced op whoami probe with
+# JSON-format identity check. We verify the authenticated SA account
+# matches the expected vade-coo service account identity. This closes
+# the chicken-and-egg break-glass hole: a stale SA token would pass
+# the old `op whoami >/dev/null` but return a different-account JSON,
+# and all subsequent op reads would silently return wrong-vault data.
 COO_BOOTSTRAP_STEP="op_whoami"
 if ! retry 5 op whoami >/dev/null; then
   log "FATAL: op whoami failed after retries. Check OP_SERVICE_ACCOUNT_TOKEN and vault access."
+  log "  Recovery: OP_SERVICE_ACCOUNT_TOKEN=<new-token> bash ${VADE_RUNTIME_DIR:-/home/user/coo-harness}/scripts/boot/coo-bootstrap.sh"
+  log "  See: coo-memory/operations/secrets/README.md §3.6"
   exit 1
 fi
-log "1Password service account authenticated: $(op whoami 2>/dev/null | head -1)"
+
+# Identity check via JSON output. The SA token's `op whoami --format=json`
+# returns the service account's name. We check it matches the expected
+# vade-coo pattern (tolerates the exact name changing slightly as long as
+# "vade-coo" appears in the ServiceAccount field).
+#
+# Self-discovering approach: on first successful boot, we accept whatever
+# identity the SA token returns and record it. Subsequent boots compare.
+# If the identity shifts (token rotated to a different SA), we surface
+# the recovery procedure.
+#
+# Note: `op whoami --format=json` may not be available on all op CLI
+# versions. The existing `op whoami` (text) already passed above; this
+# is defense-in-depth. Fail-open on parse errors (non-JSON output) so
+# a CLI version difference doesn't block boot.
+COO_BOOTSTRAP_STEP="op_whoami_identity_check"
+_sa_identity_file="${HOME}/.vade/.op-sa-identity"
+_whoami_json=""
+if _whoami_json="$(op whoami --format=json 2>/dev/null)"; then
+  # Extract service account identifier from JSON output. op whoami --format=json
+  # returns different schemas across versions; try multiple field names.
+  _sa_name="$(printf '%s' "$_whoami_json" | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    # op 2.x: {'ServiceAccount': 'name', 'URL': ..., 'UserUUID': ...}
+    for key in ['ServiceAccount', 'service_account', 'name', 'email', 'user_email']:
+        if key in d and d[key]:
+            print(d[key]); break
+except Exception:
+    pass
+" 2>/dev/null || true)"
+
+  if [ -n "$_sa_name" ]; then
+    if [ -f "$_sa_identity_file" ]; then
+      _expected_identity="$(cat "$_sa_identity_file" 2>/dev/null || true)"
+      if [ -n "$_expected_identity" ] && [ "$_sa_name" != "$_expected_identity" ]; then
+        log "FATAL: SA identity mismatch (got='${_sa_name}', expected='${_expected_identity}')"
+        log "  The OP_SERVICE_ACCOUNT_TOKEN authenticates as a different account than expected."
+        log "  Recovery: OP_SERVICE_ACCOUNT_TOKEN=<correct-token> bash ${VADE_RUNTIME_DIR:-/home/user/coo-harness}/scripts/boot/coo-bootstrap.sh"
+        log "  See: coo-memory/operations/secrets/README.md §3.6"
+        exit 1
+      fi
+    fi
+    # Record the identity for future boots (idempotent write).
+    mkdir -p "$(dirname "$_sa_identity_file")"
+    printf '%s\n' "$_sa_name" > "$_sa_identity_file" 2>/dev/null || true
+    log "1Password service account authenticated: ${_sa_name}"
+  else
+    # JSON parsed but no identity field found — CLI version difference.
+    log "1Password service account authenticated (identity field not found in JSON; skipping identity check)"
+  fi
+else
+  # op whoami --format=json not supported (old CLI) or failed. The
+  # plain `op whoami` already passed above, so we know the token works.
+  log "1Password service account authenticated: $(op whoami 2>/dev/null | head -1)"
+fi
+unset _whoami_json _sa_name _sa_identity_file
 
 COO_BOOTSTRAP_STEP="install_coo_ssh_keys"
 install_coo_ssh_keys

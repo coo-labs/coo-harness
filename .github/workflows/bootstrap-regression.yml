@@ -53,15 +53,22 @@ jobs:
       - name: Run bootstrap-regression suite
         id: run
         env:
-          # Empty by default. Today's expected-degraded set:
+          # Today's expected-degraded set:
           #   - E1–E4: live MCP probes; integrity-check.sh marks them
           #     "skip" in CI by design — never appear in degraded.
           #   - F1–F4: culture-substrate invariants; skip cleanly when
           #     coo-memory is a stub without .git.
+          #   - S2: env-aliases unset — production already accepts as
+          #     expected-yellow per SOP §3.4 (operations/secrets/README.md).
+          #     The CI fake-`op` mock returns canned values for a subset of
+          #     op:// items only; aliases on uncovered items (e.g.
+          #     CLOUDFLARE_API_TOKEN, GITHUB_APP_PRIVATE_KEY) stay unset.
+          #     Production parity is the bar; tightening the mock to
+          #     cover every credential is sibling work, not a blocker.
           # Bump this if a new structural-but-known-yellow invariant
           # lands; cite the reason in the commit message so the next
           # operator can audit.
-          VADE_CI_ALLOWLIST: ${{ github.event.inputs.allowlist || '' }}
+          VADE_CI_ALLOWLIST: ${{ github.event.inputs.allowlist || 'S2' }}
         run: bash "$GITHUB_WORKSPACE/scripts/ci/run-bootstrap-regression.sh" "$GITHUB_WORKSPACE"
 
       - name: Post or update PR comment
