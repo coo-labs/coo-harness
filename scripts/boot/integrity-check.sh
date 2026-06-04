@@ -1292,6 +1292,37 @@ else
   _add F8 skip "requires $F_REPO/bin/framed-as-caution.py + retrospectives + memos + python3"
 fi
 
+# ── Group S: Secrets-schema invariants ───────────────────────
+# Implements S1, S2, S3, S4, S5, S7, S8 from
+# coo-memory/operations/secrets/README.md §3.4. S6 demoted to warning
+# per SOP rationalization R-3 and intentionally NOT emitted here.
+#
+# Track 1b of the secrets-management implementation epic
+# (coo-memory#871). Probe-not-repair: every failure surfaces in the
+# JSON output, but the script keeps exit 0. Boot-blocking integration
+# is a follow-up PR after this soaks clean.
+#
+# Skip semantics (per S-invariant):
+#   - S1: skip if validator or PyYAML/jsonschema missing.
+#   - S2: skip if yq missing.
+#   - S3: works in CI for filesystem mirrors; sha8 check + org/repo
+#         secret checks skip when op CLI or gh CLI is unavailable.
+#   - S4: skip if op CLI not live (CI fake-env or missing
+#         OP_SERVICE_ACCOUNT_TOKEN).
+#   - S5: works in CI for filesystem path inspection; degraded reports
+#         do not impede other invariants.
+#   - S7: skip if op CLI not live.
+#   - S8: works everywhere — classifies current process env against
+#         schema + writes today's keynames snapshot.
+S_LIB="$SCRIPT_DIR/../lib/integrity-group-s.sh"
+if [ -r "$S_LIB" ]; then
+  # shellcheck source=../lib/integrity-group-s.sh
+  source "$S_LIB"
+  s_check_all
+else
+  _add S1 skip "integrity-group-s.sh helper missing at $S_LIB"
+fi
+
 # ── Serialize ────────────────────────────────────────────────
 mkdir -p "$VADE_CLOUD_STATE_DIR" 2>/dev/null || true
 
