@@ -2,22 +2,29 @@
   "mcpServers": {
     "mem0": {
       "type": "stdio",
-      "command": "/home/user/coo-harness/scripts/mcp/mem0-mcp-projection.py",
-      "args": [],
+      "command": "op",
+      "args": [
+        "run",
+        "--env-file",
+        "/home/user/coo-harness/scripts/lib/mcp-env-templates/mem0.env",
+        "--",
+        "/home/user/coo-harness/scripts/mcp/mem0-mcp-projection.py"
+      ],
       "env": {
-        "MEM0_API_KEY": "${MEM0_API_KEY}",
         "MEM0_DEFAULT_USER_ID": "ven"
       }
     },
     "agentmail": {
-      "command": "npx",
+      "command": "op",
       "args": [
+        "run",
+        "--env-file",
+        "/home/user/coo-harness/scripts/lib/mcp-env-templates/agentmail.env",
+        "--",
+        "npx",
         "-y",
         "agentmail-mcp"
-      ],
-      "env": {
-        "AGENTMAIL_API_KEY": "${AGENTMAIL_API_KEY}"
-      }
+      ]
     },
     "1password": {
       "command": "npx",

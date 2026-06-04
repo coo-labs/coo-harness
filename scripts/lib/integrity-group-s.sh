@@ -418,19 +418,19 @@ s_check_S4() {
   fi
 }
 
-# ── S5: sanctioned paths carry secret-shaped content (presence check) ─
+# ── S5: no plaintext secrets in settings.json; coo-env retired ─────
 #
-# Wording per SOP §3.4: "no plaintext PAT-shape strings in sanctioned
-# paths only". Inverted-shape interpretation per parent dispatch: the
-# sanctioned paths are EXPECTED to carry secrets (they're the only legal
-# place for plaintext bearer values), and the failure mode this catches
-# is a sanctioned path drifting to empty/malformed (no token-shapes
-# present where the schema mirrors expect them).
-#
-# This is a forward defense — TODO when settings.json indirection
-# (#873 / Track 4) lands, S5's polarity changes: at that point
-# /root/.claude/settings.json carries `${TOKEN}` refs, NOT plaintext
-# tokens, and S5 should flip to "no plaintext PAT-shape strings here".
+# Phase 2 (coo-memory#873): polarity flipped from Phase 1.
+# Phase 1 checked that sanctioned paths CARRIED secrets (expected
+# plaintext). Phase 2 checks the OPPOSITE: sanctioned paths must NOT
+# carry plaintext secret-shaped content. The only legal plaintext
+# location is the bootstrap process env (never serialized to disk).
+# Specifically:
+#   1. /root/.claude/settings.json must contain NO secret_shapes matches.
+#   2. /root/.vade/coo-env must NOT exist (retired by Phase 2).
+#   3. common.sh is a source-code file containing secret variable names
+#      but not values — skip that check (would false-positive on
+#      variable names like GITHUB_MCP_PAT in function bodies).
 s_check_S5() {
   local schema; schema="$(_s_schema_yaml)"
   if [ ! -f "$schema" ]; then
@@ -446,18 +446,7 @@ s_check_S5() {
     return
   fi
 
-  # Sanctioned-path set per SOP §3.4. /root/ paths are container-specific;
-  # the coo-harness/coo-memory paths resolve to whatever the live checkouts
-  # are (canonicalized below via $VADE_*_DIR).
-  local sanctioned=(
-    "/root/.claude/settings.json"
-    "/root/.vade/coo-env"
-    "${VADE_RUNTIME_DIR:-$HOME/coo-harness}/scripts/lib/common.sh"
-    "${VADE_COO_MEMORY_DIR:-$HOME/coo-memory}/.claude/settings.json"
-    "${VADE_COO_MEMORY_DIR:-$HOME/coo-memory}/.claude/settings.local.json"
-  )
-
-  # Collect every regex from secret_shapes. Use yq to enumerate.
+  # Collect every regex from secret_shapes.
   local patterns
   patterns="$(yq -r '.secret_shapes[].pattern' "$schema" 2>/dev/null \
     | grep -vE '^TBD' || true)"
@@ -466,47 +455,78 @@ s_check_S5() {
     return
   fi
 
-  # For each sanctioned path that exists, scan for ≥1 secret_shapes hit.
-  # Per inversion: a sanctioned path with NO hits is the failure (it's
-  # supposed to carry secrets).
-  local checked=0 empty_paths=() present_paths=0 missing_paths=()
-  for p in "${sanctioned[@]}"; do
-    if [ ! -f "$p" ]; then
-      # Missing sanctioned paths are not necessarily a failure — some
-      # are environment-specific (e.g., /root/.vade/coo-env may not
-      # exist on a macOS dev). Track but don't fail on absence.
-      missing_paths+=("${p##*/}")
-      continue
-    fi
-    checked=$((checked + 1))
-    local found=0
-    while IFS= read -r rgx; do
-      [ -z "$rgx" ] && continue
-      if grep -qE "$rgx" "$p" 2>/dev/null; then
-        found=1
-        break
-      fi
-    done <<< "$patterns"
-    if [ "$found" = 1 ]; then
-      present_paths=$((present_paths + 1))
-    else
-      empty_paths+=("${p##*/}")
-    fi
-  done
+  local violations=() checks=0
 
-  if [ "$checked" -eq 0 ]; then
-    _add S5 skip "no sanctioned paths present on this host (env may not require them)"
+  # Check 1: settings.json env block must NOT contain any secret-shaped value.
+  # Only scan the env block values — the rest of settings.json (permissions
+  # allow/deny lists, hook command strings) contains long strings that
+  # intentionally match secret_shapes patterns (e.g. the cloudflare pattern
+  # '[A-Za-z0-9_-]{40}' matches many base64/hex strings in command paths).
+  # Path is overridable via $VADE_S5_SETTINGS_JSON_OVERRIDE for test fixtures
+  # (CI fake-env, integrity-group-s test harness); production uses the literal
+  # /root path.
+  local sj="${VADE_S5_SETTINGS_JSON_OVERRIDE:-/root/.claude/settings.json}"
+  if [ -f "$sj" ] && command -v node >/dev/null 2>&1; then
+    checks=$((checks + 1))
+    local env_values
+    env_values="$(node -e '
+      const fs = require("fs");
+      let c = {};
+      try { c = JSON.parse(fs.readFileSync(process.argv[1], "utf8")) || {}; } catch { process.exit(0); }
+      const env = c.env || {};
+      // Non-secret env vars per non_secret_env_allowlist: skip their values
+      // to avoid false positives (CLOUDFLARE_ACCOUNT_ID matches agentmail shape,
+      // PATH/NODE_PATH matches various patterns, etc.).
+      const nonSecretKeys = new Set([
+        "HOME","USER","PATH","LANG","LC_ALL","TERM","PWD",
+        "CLAUDE_PROJECT_DIR","VADE_CLOUD_STATE_DIR","VADE_RUNTIME_DIR","VADE_COO_MEMORY_DIR",
+        "GITHUB_APP_ID","VADE_COO_APP_ID","CLOUDFLARE_ACCOUNT_ID",
+        "GITHUB_APP_INSTALLATION_ID",
+        "NODE_PATH","PLAYWRIGHT_BROWSERS_PATH","UV_CACHE_DIR","VADE_BINDIR","VADE_BRAKE_ENFORCE",
+        "GIT_AUTHOR_NAME","GIT_AUTHOR_EMAIL","GIT_COMMITTER_NAME","GIT_COMMITTER_EMAIL",
+        "CLAUDE_STREAM_IDLE_TIMEOUT_MS","CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS",
+        "CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS","ENABLE_CLAUDEAI_MCP_SERVERS",
+      ]);
+      // Emit values of non-allowlist keys only
+      for (const [k, v] of Object.entries(env)) {
+        if (!nonSecretKeys.has(k) && !k.startsWith("CLAUDE_") && !k.startsWith("CLAUDE_CODE_")
+            && !k.startsWith("GIT_") && v && typeof v === "string") {
+          process.stdout.write(v + "\n");
+        }
+      }
+    ' "$sj" 2>/dev/null)"
+    local found_in_settings=0
+    if [ -n "$env_values" ]; then
+      while IFS= read -r rgx; do
+        [ -z "$rgx" ] && continue
+        if printf '%s' "$env_values" | grep -qE "$rgx" 2>/dev/null; then
+          found_in_settings=1
+          break
+        fi
+      done <<< "$patterns"
+    fi
+    if [ "$found_in_settings" = 1 ]; then
+      violations+=("settings.json env values contain plaintext secret (Phase 2 scrub incomplete)")
+    fi
+  fi
+
+  # Check 2: /root/.vade/coo-env must NOT exist (retired by Phase 2).
+  # Path is overridable via $VADE_S5_COO_ENV_OVERRIDE for test fixtures.
+  local coo_env="${VADE_S5_COO_ENV_OVERRIDE:-/root/.vade/coo-env}"
+  checks=$((checks + 1))
+  if [ -f "$coo_env" ]; then
+    violations+=("coo-env exists at $coo_env (Phase 2: should be absent)")
+  fi
+
+  if [ "$checks" -eq 0 ]; then
+    _add S5 skip "no Phase 2 invariant paths present on this host"
     return
   fi
-  if [ "${#empty_paths[@]}" -eq 0 ]; then
-    local detail="$present_paths/$checked sanctioned paths carry expected secret shapes"
-    if [ "${#missing_paths[@]}" -gt 0 ]; then
-      detail="${detail}; absent (not required on this host): $(IFS=,; echo "${missing_paths[*]}")"
-    fi
-    _add S5 true "$detail"
+  if [ "${#violations[@]}" -eq 0 ]; then
+    _add S5 true "settings.json secret-free; coo-env retired (Phase 2 ok)"
   else
-    local list; list="$(IFS=,; echo "${empty_paths[*]}")"
-    _add S5 false "sanctioned paths present but carry NO secret-shape matches: $(_s_trunc "$list") (drift to empty/malformed — investigate)"
+    local vlist; vlist="$(IFS='; '; echo "${violations[*]}")"
+    _add S5 false "$vlist"
   fi
 }
 

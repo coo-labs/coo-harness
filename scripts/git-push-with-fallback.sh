@@ -163,7 +163,7 @@ main() {
     fallback_user="vade-coo"
   else
     log_err "git proxy push failed but no GitHub PAT is set (GITHUB_MCP_PAT, GITHUB_PUBLIC_PAT); cannot fall back"
-    log_err "  run scripts/boot/coo-bootstrap.sh (or source ~/.vade/coo-env) to populate them"
+    log_err "  run scripts/boot/coo-bootstrap.sh to populate them (Phase 2: no coo-env file)"
     return "$rc"
   fi
 

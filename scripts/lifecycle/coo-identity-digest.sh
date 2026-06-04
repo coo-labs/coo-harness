@@ -141,8 +141,8 @@ if [ "$_integrity_ok" = "false" ] || [ -f "$SKIP_SENTINEL" ]; then
   echo "  Proven recovery (from 2026-05-13 audit recovery-transcript.txt):"
   echo "    1) git config --file \$HOME/.gitconfig --remove-section user  # clear non-COO gitconfig"
   echo "    2) CLAUDE_CODE_REMOTE=true bash \$VADE_RUNTIME_DIR/scripts/boot/coo-bootstrap.sh"
-  echo "    3) set -a; source \$HOME/.vade/coo-env; set +a"
-  echo "    4) bash \$VADE_RUNTIME_DIR/scripts/boot/integrity-check.sh"
+  echo "    3) bash \$VADE_RUNTIME_DIR/scripts/boot/integrity-check.sh"
+  echo "    (Phase 2: coo-env retired; no source step needed)"
   if [[ ",$_integrity_degraded," == *",D4,"* ]]; then
     echo ""
     echo "  D4 is a known transient race error. Follow the recovery steps above."

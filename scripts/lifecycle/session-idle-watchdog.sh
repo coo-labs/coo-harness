@@ -270,13 +270,18 @@ cmd_close() {
   fi
   WATCHDOG_LOG="$LOG_DIR/${session_id}.log"
 
-  # Source coo-env so MEM0_API_KEY, GITHUB_MCP_PAT, R2_* are populated.
+  # Phase 2 (coo-memory#873): coo-env retired. Secrets live in process env
+  # (exported by bootstrap, inherited by this subprocess via normal fork).
+  # The watchdog inherits MEM0_API_KEY, GITHUB_MCP_PAT, R2_* from the
+  # session process tree — no explicit source needed. If coo-env still
+  # exists from a Phase 1 bootstrap (e.g., upgrade path mid-session),
+  # source it as a fallback, but do not log a degradation on absence.
   if [ -f "$COO_ENV" ]; then
     # shellcheck disable=SC1090,SC1091
     set +u; . "$COO_ENV"; set -u
-    log "sourced coo-env"
+    log "sourced legacy coo-env (Phase 1 snapshot)"
   else
-    log "coo-env not found at $COO_ENV — Mem0/git steps will degrade"
+    log "coo-env absent (Phase 2: secrets in process env via bootstrap inheritance)"
   fi
 
   # ---- a. Mark-only — no R2 export from cmd_close (coo-harness#204) ------
@@ -428,7 +433,8 @@ Follow your standard pipeline. Return the session-log path + PR URL."
   log "spawning session-closer (timeout=${timeout_seconds}s, log=$closer_log)"
 
   # Use --print for non-interactive mode + --max-budget-usd as a
-  # belt-and-braces safety net. PAT is already in env from coo-env;
+  # belt-and-braces safety net. PAT is in env from bootstrap (Phase 2:
+  # inherited via process env, not from coo-env file);
   # the closer reads MEM0_API_KEY + GITHUB_MCP_PAT directly.
   local rc=0
   timeout "${timeout_seconds}" claude \
