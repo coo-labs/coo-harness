@@ -255,6 +255,60 @@ if ! retry 5 op whoami >/dev/null; then
   exit 1
 fi
 
+# ── Rate-limit auto-fallback to OP_SERVICE_ACCOUNT_TOKEN_BACKUP ─────────
+# 1P enforces a per-SA item-read rate limit (1000 read+write per 24h on
+# Personal/Teams). Approaching the ceiling, `op whoami` continues to work
+# while `op read op://COO/...` returns "Too many requests" rc=1 — which
+# fails install_coo_ssh_keys and downstream.
+#
+# When OP_SERVICE_ACCOUNT_TOKEN_BACKUP is set, sentinel-read a small COO
+# vault item. On rate-limit (or any read failure when the primary
+# whoami is fine), swap to BACKUP for the rest of the bootstrap. BACKUP's
+# SA identity must already be in the .op-sa-identity allowlist (multi-line
+# acceptable) — operator authorizes by appending to the file.
+COO_BOOTSTRAP_STEP="op_sentinel_read"
+if [ -n "${OP_SERVICE_ACCOUNT_TOKEN_BACKUP:-}" ]; then
+  # Stderr-captured probe. The `|| _sentinel_rc=$?` consumes the
+  # non-zero exit so `set -e` doesn't trip on the command substitution.
+  _sentinel_out=""
+  _sentinel_rc=0
+  _sentinel_out="$(op read 'op://COO/vade-coo-auth/public key' 2>&1 >/dev/null)" || _sentinel_rc=$?
+  if [ "$_sentinel_rc" -ne 0 ] && printf '%s' "$_sentinel_out" | grep -qiE 'rate.?limit|too many requests'; then
+    log "coo-bootstrap: standard SA token rate-limited on op read; swapping to OP_SERVICE_ACCOUNT_TOKEN_BACKUP"
+    export OP_SERVICE_ACCOUNT_TOKEN="$OP_SERVICE_ACCOUNT_TOKEN_BACKUP"
+    if ! retry 3 op whoami >/dev/null; then
+      log "FATAL: BACKUP SA token failed op whoami after standard rate-limited"
+      log "  See: coo-memory/operations/secrets/README.md §3.6"
+      exit 1
+    fi
+    log "coo-bootstrap: BACKUP SA token active"
+    # Auto-append BACKUP's identity to the allowlist on first successful
+    # swap. Authorization signal is the operator setting the BACKUP env
+    # var; this avoids a FATAL on the identity-check immediately below
+    # when a fresh container has not yet seen BACKUP. Idempotent.
+    _backup_id="$(op whoami --format=json 2>/dev/null | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    for k in ['user_uuid','account_uuid','ServiceAccount','service_account','name','email','user_email']:
+        if k in d and d[k]:
+            print(d[k]); break
+except Exception:
+    pass
+" 2>/dev/null || true)"
+    if [ -n "$_backup_id" ]; then
+      mkdir -p "$(dirname "${HOME}/.vade/.op-sa-identity")"
+      touch "${HOME}/.vade/.op-sa-identity"
+      if ! grep -Fxq "$_backup_id" "${HOME}/.vade/.op-sa-identity" 2>/dev/null; then
+        printf '%s\n' "$_backup_id" >> "${HOME}/.vade/.op-sa-identity"
+        log "coo-bootstrap: appended BACKUP identity '${_backup_id}' to .op-sa-identity allowlist"
+      fi
+    fi
+    unset _backup_id
+  fi
+  unset _sentinel_out _sentinel_rc
+fi
+
 # Identity check via JSON output. The SA token's `op whoami --format=json`
 # returns the service account's name. We check it matches the expected
 # vade-coo pattern (tolerates the exact name changing slightly as long as
@@ -292,18 +346,24 @@ except Exception:
 
   if [ -n "$_sa_name" ]; then
     if [ -f "$_sa_identity_file" ]; then
-      _expected_identity="$(cat "$_sa_identity_file" 2>/dev/null || true)"
-      if [ -n "$_expected_identity" ] && [ "$_sa_name" != "$_expected_identity" ]; then
-        log "FATAL: SA identity mismatch (got='${_sa_name}', expected='${_expected_identity}')"
-        log "  The OP_SERVICE_ACCOUNT_TOKEN authenticates as a different account than expected."
+      # .op-sa-identity is a newline-separated allowlist of accepted SA
+      # identities. First-boot writes a single line (self-discovery);
+      # operator appends additional identities to authorize fallback SAs
+      # such as OP_SERVICE_ACCOUNT_TOKEN_BACKUP. Matching is exact-line.
+      if ! grep -Fxq "$_sa_name" "$_sa_identity_file" 2>/dev/null; then
+        log "FATAL: SA identity '${_sa_name}' not in allowlist ${_sa_identity_file}"
+        log "  The OP_SERVICE_ACCOUNT_TOKEN authenticates as an SA not in the allowlist."
         log "  Recovery: OP_SERVICE_ACCOUNT_TOKEN=<correct-token> bash ${VADE_RUNTIME_DIR:-/home/user/coo-harness}/scripts/boot/coo-bootstrap.sh"
+        log "  To authorize this SA: append '${_sa_name}' to ${_sa_identity_file}"
         log "  See: coo-memory/operations/secrets/README.md §3.6"
         exit 1
       fi
+    else
+      # First-boot self-discovery — write the current identity as the
+      # initial allowlist entry.
+      mkdir -p "$(dirname "$_sa_identity_file")"
+      printf '%s\n' "$_sa_name" > "$_sa_identity_file" 2>/dev/null || true
     fi
-    # Record the identity for future boots (idempotent write).
-    mkdir -p "$(dirname "$_sa_identity_file")"
-    printf '%s\n' "$_sa_name" > "$_sa_identity_file" 2>/dev/null || true
     log "1Password service account authenticated: ${_sa_name}"
   else
     # JSON parsed but no identity field found — CLI version difference.
