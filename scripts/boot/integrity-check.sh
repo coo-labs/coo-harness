@@ -245,18 +245,30 @@ else
   _add D3 false "coo-bootstrap.log missing"
 fi
 
-# D4: MCP tokens in settings.json env (Claude Code substitutes them into
-# .mcp.json's ${TOKEN} refs at MCP-startup time, so they must live here);
-# VADE_*_DIR vars in process env (reach Claude Code via the container UI
-# .env block per coo-harness#274).
+# D4: Phase 2 (coo-memory#873): MCP tokens no longer live in settings.json env.
+# MCP children receive secrets via `op run --env-file` at spawn time.
+# The check now verifies:
+#   1. MCP env-template files are present (op run --env-file targets exist).
+#   2. settings.json env does NOT contain secret keys (Phase 2 scrub).
+#   3. VADE_*_DIR vars are in process env (container UI .env-block source).
 if check_cmd node && [ -f "$HOME/.claude/settings.json" ]; then
-  D4_missing_tokens="$(node -e '
+  _MCP_TEMPLATE_DIR="${VADE_RUNTIME_DIR:-/home/user/coo-harness}/scripts/lib/mcp-env-templates"
+  D4_missing_templates=""
+  for t in mem0.env agentmail.env; do
+    [ -f "$_MCP_TEMPLATE_DIR/$t" ] || D4_missing_templates="${D4_missing_templates}${t},"
+  done
+  D4_missing_templates="${D4_missing_templates%,}"
+  D4_stale_secrets="$(node -e '
     const fs = require("fs");
     let c = {};
     try { c = JSON.parse(fs.readFileSync(process.argv[1], "utf8")) || {}; } catch { process.exit(0); }
     const env = c.env || {};
-    const req = ["GITHUB_MCP_PAT","GITHUB_TOKEN","AGENTMAIL_API_KEY","MEM0_API_KEY"];
-    process.stdout.write(req.filter(k => !env[k]).join(","));
+    const secrets = ["GITHUB_MCP_PAT","GITHUB_TOKEN","GITHUB_PUBLIC_PAT",
+                     "AGENTMAIL_API_KEY","MEM0_API_KEY",
+                     "R2_TRANSCRIPTS_ACCESS_KEY_ID","R2_TRANSCRIPTS_SECRET_ACCESS_KEY",
+                     "TRANSCRIPTS_AGE_IDENTITY","CLOUDFLARE_API_TOKEN",
+                     "VADE_AUTH_TOKEN","VADE_BEARER_TOKEN","GITHUB_APP_PRIVATE_KEY"];
+    process.stdout.write(secrets.filter(k => env[k]).join(","));
   ' "$HOME/.claude/settings.json" 2>/dev/null)"
   D4_missing_dirs=""
   for v in VADE_CLOUD_STATE_DIR VADE_RUNTIME_DIR VADE_COO_MEMORY_DIR; do
@@ -264,11 +276,12 @@ if check_cmd node && [ -f "$HOME/.claude/settings.json" ]; then
     [ -z "$val" ] && D4_missing_dirs="${D4_missing_dirs}${v},"
   done
   D4_missing_dirs="${D4_missing_dirs%,}"
-  if [ -z "$D4_missing_tokens" ] && [ -z "$D4_missing_dirs" ]; then
-    _add D4 true "MCP tokens in settings.json env + VADE_*_DIR in process env (UI .env-block source post-PR9)"
+  if [ -z "$D4_missing_templates" ] && [ -z "$D4_stale_secrets" ] && [ -z "$D4_missing_dirs" ]; then
+    _add D4 true "MCP env-templates present; settings.json env secret-free; VADE_*_DIR in process env"
   else
     detail=""
-    [ -n "$D4_missing_tokens" ] && detail="settings.json env missing: $D4_missing_tokens"
+    [ -n "$D4_missing_templates" ] && detail="MCP templates missing: $D4_missing_templates"
+    [ -n "$D4_stale_secrets" ] && detail="${detail:+$detail; }secrets still in settings.json: $D4_stale_secrets"
     [ -n "$D4_missing_dirs" ] && detail="${detail:+$detail; }process env missing: $D4_missing_dirs"
     _add D4 false "$detail"
   fi
@@ -401,12 +414,14 @@ elif [ -z "$_mem0_bin" ]; then
   E5_ok=false
   E5_detail="mem0-mcp-server binary missing; run ensure_mem0_mcp_server (cloud-setup.sh installs at build; session-start-sync.sh retries on resume)"
 elif [ -z "${MEM0_API_KEY:-}" ]; then
-  # Binary present but no key in process env. settings.json env will
-  # populate it for Claude's MCP spawn, but the script itself runs in
-  # a hook subprocess that may not have inherited yet. Treat as skip
-  # rather than fail to avoid false negatives.
+  # Binary present but no key in process env. Phase 2 (coo-memory#873):
+  # MEM0_API_KEY is no longer in settings.json env. It is exported
+  # in-process by bootstrap (available to hook subprocesses) and resolved
+  # at MCP spawn time via `op run --env-file mcp-env-templates/mem0.env`.
+  # If it's absent here, bootstrap hasn't run yet or failed. Treat as
+  # skip rather than fail to avoid false negatives in hook sub-processes.
   E5_ok=skip
-  E5_detail="mem0-mcp-server present at $_mem0_bin; MEM0_API_KEY not in hook env (cannot probe; settings.json env will populate at MCP spawn)"
+  E5_detail="mem0-mcp-server present at $_mem0_bin; MEM0_API_KEY not in hook env (bootstrap may not have completed; op run --env-file resolves at MCP spawn)"
 elif ! check_cmd timeout || ! check_cmd node; then
   E5_ok=skip
   E5_detail="timeout or node missing; cannot probe"
@@ -818,7 +833,7 @@ if [ -n "${VADE_CI_WORKSPACE_ROOT:-}" ] || [ -n "${VADE_BINDIR_OVERRIDE:-}" ]; t
   E9_detail="skipped in CI fake-env (VADE_CI_WORKSPACE_ROOT or VADE_BINDIR_OVERRIDE set); live-only probe"
 elif [ -z "${CLOUDFLARE_API_TOKEN:-}" ] || [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
   E9_ok=skip
-  E9_detail="CLOUDFLARE_API_TOKEN or CLOUDFLARE_ACCOUNT_ID not in hook env (settings.json env will populate for wrangler spawn; this probe runs in a hook subprocess that may not have inherited yet)"
+  E9_detail="CLOUDFLARE_API_TOKEN or CLOUDFLARE_ACCOUNT_ID not in hook env (Phase 2: secrets live in process env only; this probe runs in a hook subprocess that may not have inherited from bootstrap yet)"
 elif ! check_cmd curl || ! check_cmd node; then
   E9_ok=skip
   E9_detail="curl or node missing; cannot probe"

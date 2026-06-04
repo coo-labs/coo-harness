@@ -122,6 +122,53 @@ case "${1:-}" in
     esac
     exit 0
     ;;
+  run)
+    # Phase 2 (coo-memory#873): MCP children spawn via `op run --env-file`.
+    # In CI the real `op run` would resolve op:// refs and inject them; the
+    # mock parses the --env-file, resolves each line's op:// ref via our
+    # `op read` mock, exports the result, and execs the trailing command.
+    # This keeps CI end-to-end without a real 1Password connection.
+    shift  # drop "run"
+    ENV_FILE=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --env-file)
+          ENV_FILE="$2"; shift 2 ;;
+        --env-file=*)
+          ENV_FILE="${1#--env-file=}"; shift ;;
+        --)
+          shift; break ;;
+        --no-masking)
+          shift ;;
+        *)
+          break ;;
+      esac
+    done
+    if [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ]; then
+      while IFS='=' read -r var_name var_ref || [ -n "$var_name" ]; do
+        # Skip comment lines and blank lines
+        case "$var_name" in
+          '#'*|'') continue ;;
+        esac
+        # Trim leading whitespace
+        var_name="${var_name#"${var_name%%[! ]*}"}"
+        # Only handle op:// refs; plain values pass through as-is
+        case "$var_ref" in
+          op://*)
+            val="$(bash "$0" read "$var_ref" 2>/dev/null || true)"
+            if [ -n "$val" ]; then
+              export "$var_name=$val"
+            fi
+            ;;
+          *)
+            # Plain value (no op:// ref) — export as-is if non-empty
+            [ -n "$var_ref" ] && export "$var_name=$var_ref"
+            ;;
+        esac
+      done < "$ENV_FILE"
+    fi
+    exec "$@"
+    ;;
   *)
     echo "[mock op] unhandled subcommand: $*" >&2
     exit 2

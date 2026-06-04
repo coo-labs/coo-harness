@@ -78,7 +78,7 @@ if [ "${CLAUDE_CODE_REMOTE:-}" != "true" ]; then
   bootstrap_log_record SKIP "CLAUDE_CODE_REMOTE!=true"
   _write_skip_reason \
     "CLAUDE_CODE_REMOTE!=true — coo-bootstrap exited before identity load" \
-    "Fix: VADE_FORCE_COO_BOOTSTRAP=1 CLAUDE_CODE_REMOTE=true bash $VADE_RUNTIME_DIR/scripts/boot/coo-bootstrap.sh; set -a; source ~/.vade/coo-env; set +a; bash $VADE_RUNTIME_DIR/scripts/boot/integrity-check.sh"
+    "Fix: VADE_FORCE_COO_BOOTSTRAP=1 CLAUDE_CODE_REMOTE=true bash $VADE_RUNTIME_DIR/scripts/boot/coo-bootstrap.sh; bash $VADE_RUNTIME_DIR/scripts/boot/integrity-check.sh"
   trap - EXIT
   exit 0
 fi
@@ -146,7 +146,6 @@ fi
 # key is absent, treat the marker as stale and re-run. run-2026-04-22T073717
 # hit exactly this: marker present, settings.json env had only
 # AGENTMAIL_API_KEY, GITHUB_MCP_PAT was unset, vade-coo identity dark.
-COO_ENV_FILE="${HOME}/.vade/coo-env"
 COO_BOOT_MARKER="${HOME}/.vade/.coo-bootstrap-done"
 _settings_env_complete() {
   local settings="${CLAUDE_CONFIG_DIR:-${HOME}/.claude}/settings.json"
@@ -158,24 +157,17 @@ _settings_env_complete() {
     try { cfg = JSON.parse(fs.readFileSync(process.argv[1], "utf8")) || {}; }
     catch { process.exit(1); }
     const env = cfg.env || {};
-    // Bootstrap-blocking required-list: every key here, when missing, force-re-runs
-    // the full bootstrap. VADE_AUTH_TOKEN is intentionally NOT in this list — it
-    // is passed through merge_coo_settings_env (best-effort) but feature-gated and
-    // may be empty in some environments without warranting a full re-run.
-    const required = ["GITHUB_MCP_PAT", "GITHUB_TOKEN", "AGENTMAIL_API_KEY", "MEM0_API_KEY",
-                      "R2_TRANSCRIPTS_ACCESS_KEY_ID", "R2_TRANSCRIPTS_SECRET_ACCESS_KEY",
-                      "TRANSCRIPTS_AGE_IDENTITY",
-                      "VADE_CLOUD_STATE_DIR", "PATH"];
+    // Phase 2 (coo-memory#873): secrets no longer live in settings.json.
+    // The required-list is limited to the non-secret path vars that
+    // _write_claude_settings_paths persists. The secret vars (GITHUB_MCP_PAT,
+    // AGENTMAIL_API_KEY, MEM0_API_KEY, etc.) are exported in-process only
+    // by fetch_coo_secrets and must NOT appear here.
+    const required = ["VADE_CLOUD_STATE_DIR", "PATH"];
     for (const k of required) { if (!env[k]) process.exit(1); }
     // PATH content sanity: Claude Code does not shell-expand env values,
     // so a literal "${PATH}" in this position is the broken-output of an
     // earlier bootstrap (coo-harness#83 first-cut bug). Force re-run so
     // _write_claude_settings_paths overwrites with the expanded form.
-    // No FHS-layout floor (coo-harness#141): hard-coding /usr/bin
-    // overfit to the Debian base image and would re-trigger the
-    // bootstrap on every boot if the image family ever changes
-    // (Alpine/musl, Nix-style /nix/store, etc.). The literal-${PATH}
-    // check above is the load-bearing one.
     if (env.PATH.includes("${PATH}")) {
       process.exit(1);
     }
@@ -183,7 +175,7 @@ _settings_env_complete() {
   ' "$settings" 2>/dev/null
 }
 if [ "${VADE_FORCE_COO_BOOTSTRAP:-0}" != "1" ] \
-   && [ -f "$COO_ENV_FILE" ] && [ -f "$COO_BOOT_MARKER" ] \
+   && [ -f "$COO_BOOT_MARKER" ] \
    && _settings_env_complete \
    && _cached_pat_still_valid; then
   log "coo-bootstrap: already complete this container; skipping."
@@ -198,17 +190,17 @@ if [ "${VADE_FORCE_COO_BOOTSTRAP:-0}" != "1" ] \
 fi
 if [ -f "$COO_BOOT_MARKER" ] && [ "${VADE_FORCE_COO_BOOTSTRAP:-0}" != "1" ]; then
   # Marker exists but at least one shortcut precondition failed:
-  # settings.json env block is missing a key (pre-#18 bootstrap, see
-  # comment above), or the cached PAT no longer authenticates as
-  # vade-coo (#72 — revocation/scope-change/expiry between snapshots).
-  # Fall through to the full bootstrap to refresh both.
-  if [ -f "$COO_ENV_FILE" ] && _settings_env_complete \
-     && ! _cached_pat_still_valid; then
+  # settings.json env block is missing a path var, or the cached PAT
+  # no longer authenticates as vade-coo (#72 — revocation/scope-change/
+  # expiry between snapshots). Fall through to the full bootstrap.
+  # Phase 2 (coo-memory#873): coo-env file no longer exists; skip-check
+  # no longer requires it.
+  if _settings_env_complete && ! _cached_pat_still_valid; then
     log "coo-bootstrap: marker present but cached GITHUB_MCP_PAT no longer authenticates as vade-coo; re-running"
     bootstrap_log_record START "marker stale (cached PAT failed validation); forcing re-run"
   else
     log "coo-bootstrap: marker present but settings.json env incomplete; re-running"
-    bootstrap_log_record START "marker stale (settings.json env missing keys); forcing re-run"
+    bootstrap_log_record START "marker stale (settings.json env missing path vars); forcing re-run"
   fi
 fi
 
@@ -231,29 +223,11 @@ if [ -n "${OP_SERVICE_ACCOUNT_TOKEN_NEW:-}" ]; then
     log "coo-bootstrap: rotated SA token validates; accepting as canonical"
     export OP_SERVICE_ACCOUNT_TOKEN="$OP_SERVICE_ACCOUNT_TOKEN_NEW"
     unset OP_SERVICE_ACCOUNT_TOKEN_NEW
-    # Persist the new token into coo-env so the next session picks it up.
-    # Only update if the file already exists (i.e., a prior bootstrap ran).
-    if [ -f "$COO_ENV_FILE" ]; then
-      (
-        umask 077
-        # Replace or append the OP_SERVICE_ACCOUNT_TOKEN line.
-        if grep -q "^export OP_SERVICE_ACCOUNT_TOKEN=" "$COO_ENV_FILE" 2>/dev/null; then
-          # sed in-place replacement — value may contain special chars so use
-          # a Python one-liner to avoid quoting hazards.
-          python3 -c "
-import sys, os
-path = sys.argv[1]; new_val = os.environ.get('OP_SERVICE_ACCOUNT_TOKEN','')
-lines = open(path).readlines()
-out = [l for l in lines if not l.startswith('export OP_SERVICE_ACCOUNT_TOKEN=')]
-out.append(f\"export OP_SERVICE_ACCOUNT_TOKEN='{new_val}'\n\")
-open(path,'w').writelines(out)
-" "$COO_ENV_FILE" 2>/dev/null || true
-        else
-          printf "export OP_SERVICE_ACCOUNT_TOKEN='%s'\n" "$OP_SERVICE_ACCOUNT_TOKEN" >> "$COO_ENV_FILE"
-        fi
-      )
-      log "coo-bootstrap: persisted rotated OP_SERVICE_ACCOUNT_TOKEN to $COO_ENV_FILE"
-    fi
+    # Phase 2 (coo-memory#873): coo-env file retired. The new SA token is
+    # now in the process env (exported above). No disk persistence needed —
+    # on the next container boot the cloud-env config injects the current
+    # OP_SERVICE_ACCOUNT_TOKEN. Document the rotation in the bootstrap log.
+    log "coo-bootstrap: rotated SA token accepted (in-process only; no coo-env file to update)"
   else
     log "coo-bootstrap: rotated SA token (OP_SERVICE_ACCOUNT_TOKEN_NEW) failed; falling back to current token"
     unset OP_SERVICE_ACCOUNT_TOKEN_NEW
