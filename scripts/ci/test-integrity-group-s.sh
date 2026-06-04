@@ -73,11 +73,15 @@ _render_fixture() {
 _stage_memory() {
   local dir="$1"
   mkdir -p "$dir/operations/secrets/env-snapshots" "$dir/bin"
-  # Stage a copy of secrets-schema-check.py + schema.schema.json from
-  # the live coo-memory checkout if available. If not, S1 will skip
-  # cleanly (caller decides whether to assert).
+  # Stage a copy of secrets-schema-check.py + schema.schema.json. Prefer
+  # the live coo-memory checkout (when available — local dev surface);
+  # fall back to the CI fixtures committed alongside this test (synced
+  # from coo-memory's Track 1a). The fixtures avoid a cross-repo clone
+  # dependency in CI where coo-memory is private and no PAT is stored.
   local src_validator="${VADE_COO_MEMORY_DIR:-/home/user/coo-memory}/bin/secrets-schema-check.py"
+  [ -f "$src_validator" ] || src_validator="$REPO_ROOT/scripts/ci/fixtures/secrets-schema-check.py"
   local src_schema="${VADE_COO_MEMORY_DIR:-/home/user/coo-memory}/operations/secrets/schema.schema.json"
+  [ -f "$src_schema" ] || src_schema="$REPO_ROOT/scripts/ci/fixtures/secrets-schema.schema.json"
   if [ -f "$src_validator" ]; then
     cp "$src_validator" "$dir/bin/secrets-schema-check.py"
     chmod +x "$dir/bin/secrets-schema-check.py"
