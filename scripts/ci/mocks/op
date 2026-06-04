@@ -26,11 +26,13 @@ case "${1:-}" in
     ;;
   whoami)
     # Track 4 Phase 1: support --format=json for SA identity check.
-    # Return the same ServiceAccount name in both text and JSON forms
-    # so the identity file is written and compared correctly in CI.
+    # Returns op 2.31+ live schema (url/URL/user_uuid/account_uuid/user_type/
+    # ServiceAccountType) so the CI mock matches the production CLI shape;
+    # `ServiceAccount` is kept in parallel so forward-compat across CLI
+    # versions stays exercised in CI.
     case "${2:-}" in
       --format=json|--format)
-        printf '{"ServiceAccount":"ci-mock-coo-bootstrap","URL":"https://ci.mock","UserUUID":"00000000-0000-0000-0000-000000000000"}\n'
+        printf '{"url":"https://ci.mock","URL":"https://ci.mock","user_uuid":"CIMOCKCIMOCKCIMOCKCIMOCKCI","account_uuid":"CIMOCKACCOUNTCIMOCKACCOUNTC","user_type":"SERVICE_ACCOUNT","ServiceAccountType":"SERVICE_ACCOUNT","ServiceAccount":"ci-mock-coo-bootstrap"}\n'
         ;;
       *)
         echo "ServiceAccount: ci-mock-coo-bootstrap"
