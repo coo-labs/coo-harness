@@ -42,9 +42,22 @@ jobs:
       github.event.pull_request.user.login != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
+      # Track 5 (coo-labs/coo-memory#871): load VADE_PROJECT_PAT from 1Password.
+      # PREREQUISITE: OP_SERVICE_ACCOUNT_TOKEN org-level secret must be set.
+      # Until provisioned, this step no-ops and the secrets.VADE_PROJECT_PAT
+      # mirror remains the active path.
+      - name: Load secrets from 1Password (Track 5 migration)
+        if: ${{ env.OP_SERVICE_ACCOUNT_TOKEN != '' }}
+        uses: 1password/load-secrets-action@v2
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          VADE_PROJECT_PAT: op://COO/VADE_PROJECT_PAT/token
+        with:
+          export-env: true
+
       - name: Add PR to VADE project, set Status=In Progress
         env:
-          VADE_PROJECT_PAT: ${{ secrets.VADE_PROJECT_PAT }}
+          VADE_PROJECT_PAT: ${{ env.VADE_PROJECT_PAT || secrets.VADE_PROJECT_PAT }}
           PR_NODE_ID: ${{ github.event.pull_request.node_id }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
