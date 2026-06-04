@@ -136,12 +136,27 @@ s_check_S2() {
     return
   fi
 
+  # Post-Phase-2 the integrity-check subprocess does not inherit secrets
+  # exported by coo-bootstrap.sh's fetch_coo_secrets — Phase 2 (#873)
+  # retired both settings.json::env and /root/.vade/coo-env, so the
+  # process env this hook sees is structurally empty of declared
+  # env-aliases regardless of whether bootstrap succeeded.
+  #
+  # fetch_coo_secrets writes a keynames-only sentinel to
+  # ${HOME}/.vade/.bootstrap-exports listing the env-aliases it
+  # successfully exported. S2 accepts that file as proof of export when
+  # the alias isn't visible in this process's env.
+  local exports_sentinel="${HOME}/.vade/.bootstrap-exports"
   local total=0 missing=()
   while IFS='|' read -r id status alias; do
     [ -z "$alias" ] && continue
     total=$((total + 1))
     eval "val=\${$alias:-}"
     if [ -z "${val:-}" ]; then
+      # Fallback: did bootstrap successfully export this alias?
+      if [ -f "$exports_sentinel" ] && grep -Fxq "$alias" "$exports_sentinel" 2>/dev/null; then
+        continue
+      fi
       missing+=("${id}:${alias}")
     fi
   done <<< "$rows"

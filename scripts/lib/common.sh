@@ -1529,6 +1529,23 @@ fetch_coo_secrets() {
   # (gh, op, COO tools) inherits from this process after bootstrap completes.
   log "  fetched SCHEMA_FETCH_GOT=${SCHEMA_FETCH_GOT} secrets (in-process only; no coo-env file)"
 
+  # Bootstrap-exports keynames sentinel for integrity-check S2.
+  # The integrity-check.sh subprocess runs in a sibling hook with its own
+  # env — Phase 2 retired the settings.json::env mirror for secrets, so
+  # the subprocess can't see what fetch_coo_secrets just exported.
+  # Write a keynames-only file (no values; safe at rest in tmpfs/$HOME)
+  # so S2 can verify the bootstrap successfully exported each declared
+  # env-alias instead of trying to read the alias from its own process env
+  # (which is structurally empty post-Phase-2).
+  local exports_file="${HOME}/.vade/.bootstrap-exports"
+  if printf '%s\n' "$fetch_output" \
+      | awk -F'=' '/^export [A-Z][A-Z0-9_]*=/ { sub(/^export /, "", $1); print $1 }' \
+      | sort -u \
+      > "$exports_file" 2>/dev/null; then
+    chmod 600 "$exports_file" 2>/dev/null || true
+    log "  wrote bootstrap-exports keynames sentinel ($(wc -l < "$exports_file" | tr -d ' ') keys) → $exports_file"
+  fi
+
   # vars already exported to current shell by eval above.
   # Mirror GITHUB_TOKEN = GITHUB_MCP_PAT if the helper didn't emit it
   # separately (schema alias: both are listed under github-pat-vade-coo,
