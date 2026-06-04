@@ -93,6 +93,32 @@ jobs:
     if: ${{ inputs.mode == 'full' || !inputs.opener-is-bot }}
     runs-on: ubuntu-latest
     steps:
+      # Track 5 (coo-labs/coo-memory#871): load secrets from 1Password vault
+      # directly, eliminating the ANTHROPIC_API_KEY and VADE_PROJECT_PAT
+      # org-secret mirrors for this workflow.
+      #
+      # PREREQUISITE: `OP_SERVICE_ACCOUNT_TOKEN` must be set as a GitHub
+      # org-level secret (or repo-level in each caller repo) before this
+      # step can resolve op:// references. Until that secret is provisioned,
+      # the step is a no-op (the action skips gracefully when the env var
+      # is absent — the existing secrets.* references below remain the
+      # active path).
+      #
+      # To provision: GitHub UI → coo-labs org → Settings → Secrets →
+      # Actions → New org secret → Name: OP_SERVICE_ACCOUNT_TOKEN →
+      # Value: (the service account token from op://COO/Service Account
+      # Auth Token: vade-coo/credential). See schema.yaml `op-service-account-token`.
+      - name: Load secrets from 1Password (Track 5 migration)
+        id: op_secrets
+        if: ${{ env.OP_SERVICE_ACCOUNT_TOKEN != '' }}
+        uses: 1password/load-secrets-action@v2
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          ANTHROPIC_API_KEY: op://COO/ANTHROPIC_API_KEY/credential
+          VADE_PROJECT_PAT: op://COO/VADE_PROJECT_PAT/token
+        with:
+          export-env: true
+
       - name: Classify, label, and add to VADE project
         uses: anthropics/claude-code-action@v1
         env:
@@ -100,7 +126,9 @@ jobs:
           # Propagated to the subprocess so the prompt's project
           # GraphQL mutations can use it via `GH_TOKEN=…`. If unset,
           # the project step in the prompt gracefully skips.
-          VADE_PROJECT_PAT: ${{ secrets.VADE_PROJECT_PAT }}
+          # Track 5: loaded from op:// when OP_SERVICE_ACCOUNT_TOKEN org
+          # secret is set; falls back to secrets.VADE_PROJECT_PAT mirror.
+          VADE_PROJECT_PAT: ${{ env.VADE_PROJECT_PAT || secrets.VADE_PROJECT_PAT }}
           # MODE drives the prompt's gap-fill vs full-reclassify branch:
           # `gapfill` on `issues.opened` (default; respects opener-set
           # state), `full` on `workflow_dispatch` (re-classify all
@@ -108,7 +136,7 @@ jobs:
           # pre-existing label or milestone. See coo-memory#834.
           MODE: ${{ inputs.mode }}
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          anthropic_api_key: ${{ env.ANTHROPIC_API_KEY || secrets.ANTHROPIC_API_KEY }}
           # bypassPermissions because the subprocess runs headless in CI —
           # no interactive prompt available, so default-deny blocks the
           # label-write and project-mutation paths. Blast radius is
