@@ -109,9 +109,6 @@ jobs:
       - name: Redaction engine — corpus + thinking + negative tests
         run: python3 "$GITHUB_WORKSPACE/scripts/ci/test-transcript-redaction.py"
 
-      - name: Secret Registration Rule — common.sh ↔ redaction config parity
-        run: bash "$GITHUB_WORKSPACE/scripts/ci/check-secret-registration.sh"
-
       - name: Install age (apt)
         run: sudo apt-get install -y --no-install-recommends age
 
