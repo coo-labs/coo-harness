@@ -1039,6 +1039,18 @@ F4_ALLOWLIST_SHA=(
   # F_CUTOFF_GIT comment block above). Cleared in run-2026-05-02T120959
   # full-bootup pass.
   "7cb8a86da4"
+  # d3479467e8 — coo-memory commit "end-session: streamline (pre-fill
+  # title, inline Mem0 shape, scripted PR-open)" on 2026-06-04. Author
+  # leaked as Claude <noreply@anthropic.com>; committer correctly set
+  # to Coo <coo@vade-app.dev>. Root cause: Anthropic shipped a new
+  # silent override on git credentials earlier that day that defeated
+  # the existing COO author-override; the override-on-override was
+  # patched same session, and the prior session re-attributed most of
+  # the affected commits, but this one landed on main before the
+  # remediation and was missed in the sweep. Already pushed to
+  # origin/main — rewriting public history is the wrong tradeoff.
+  # Allowlisted with full causal record above; no policy gap.
+  "d3479467e8"
 )
 if [ -d "$F_REPO/.git" ] && check_cmd git; then
   f4_total=0
