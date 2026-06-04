@@ -142,3 +142,19 @@ jobs:
           # PyYAML for the manifest reader
           pip install --quiet pyyaml
           bash "$GITHUB_WORKSPACE/scripts/ci/test-boot-brake-guard.sh"
+
+      - name: Install yq (Go) for Group S tests
+        # Group S helpers parse schema.yaml via yq. The Python yq
+        # (apt's `yq`) has different syntax; install the Go binary
+        # the production container ships.
+        run: |
+          sudo wget -q -O /usr/local/bin/yq \
+            https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Integrity group S — secrets-schema invariants (coo-memory#871)
+        run: |
+          # jsonschema for the S1 validator path. PyYAML already
+          # installed in the prior step's chain.
+          pip install --quiet jsonschema pyyaml
+          bash "$GITHUB_WORKSPACE/scripts/ci/test-integrity-group-s.sh"
