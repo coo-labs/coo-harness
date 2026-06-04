@@ -301,12 +301,15 @@ _whoami_json=""
 if _whoami_json="$(op whoami --format=json 2>/dev/null)"; then
   # Extract service account identifier from JSON output. op whoami --format=json
   # returns different schemas across versions; try multiple field names.
+  # op 2.31+ live: {'url','URL','user_uuid','account_uuid','user_type','ServiceAccountType'}
+  # — `user_uuid` is the stable per-integration identifier and the right
+  # unit for SA-rotation detection. Older schemas exposing `ServiceAccount`
+  # / `name` are kept for forward-compat across CLI versions.
   _sa_name="$(printf '%s' "$_whoami_json" | python3 -c "
 import json, sys
 try:
     d = json.load(sys.stdin)
-    # op 2.x: {'ServiceAccount': 'name', 'URL': ..., 'UserUUID': ...}
-    for key in ['ServiceAccount', 'service_account', 'name', 'email', 'user_email']:
+    for key in ['user_uuid', 'account_uuid', 'ServiceAccount', 'service_account', 'name', 'email', 'user_email']:
         if key in d and d[key]:
             print(d[key]); break
 except Exception:
