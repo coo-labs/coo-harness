@@ -1449,9 +1449,57 @@ fetch_coo_secrets() {
   # Capture stdout; let stderr flow to the caller's log (same as retry's
   # log_err pattern). Fail-open on individual credential failures (each
   # warn is emitted by the helper); fail-closed only on schema error (rc=1).
-  local fetch_output
+  #
+  # Phase 2 follow-up cache: schema-fetch output is cached in tmpfs for
+  # the session. Re-bootstraps (stale-PAT detection, settings.json env
+  # incomplete) within the TTL eval the cache instead of re-running the
+  # python iterator's ~12 op-reads. Cache invalidates on schema hash
+  # change or TTL expiry. Container-ephemeral; dies on reboot.
+  local fetch_cache_dir
+  if [ -d /dev/shm ] && [ -w /dev/shm ]; then
+    fetch_cache_dir="/dev/shm/coo-secret-cache"
+  else
+    fetch_cache_dir="/tmp/coo-secret-cache"
+  fi
+  local fetch_cache="$fetch_cache_dir/schema-fetch.sh"
+  local fetch_cache_meta="$fetch_cache_dir/schema-fetch.meta"
+  local fetch_cache_ttl=86400
+  local fetch_output=""
   local fetch_rc=0
-  fetch_output="$(python3 "$helper" --schema "$schema_path")" || fetch_rc=$?
+  local fetch_now
+  fetch_now="$(date +%s 2>/dev/null || echo 0)"
+  local schema_sha
+  schema_sha="$(sha256sum "$schema_path" 2>/dev/null | cut -c1-16)"
+  local cache_hit=0
+
+  if [ -f "$fetch_cache" ] && [ -f "$fetch_cache_meta" ]; then
+    local meta_sha meta_expiry
+    meta_sha="$(awk -F= '$1=="schema_sha"{print $2; exit}' "$fetch_cache_meta" 2>/dev/null)"
+    meta_expiry="$(awk -F= '$1=="expiry"{print $2; exit}' "$fetch_cache_meta" 2>/dev/null)"
+    if [ "$meta_sha" = "$schema_sha" ] && [ "${meta_expiry:-0}" -gt "$fetch_now" ] 2>/dev/null; then
+      fetch_output="$(cat "$fetch_cache" 2>/dev/null || true)"
+      [ -n "$fetch_output" ] && cache_hit=1
+    fi
+  fi
+
+  if [ "$cache_hit" -eq 0 ]; then
+    fetch_output="$(python3 "$helper" --schema "$schema_path")" || fetch_rc=$?
+    # Populate cache on a successful fetch with output.
+    if [ -n "$fetch_output" ] && [ "$fetch_rc" -ne 1 ]; then
+      mkdir -p "$fetch_cache_dir" 2>/dev/null || true
+      chmod 0700 "$fetch_cache_dir" 2>/dev/null || true
+      local umask_save; umask_save="$(umask)"
+      umask 0177
+      printf '%s' "$fetch_output" > "$fetch_cache" 2>/dev/null || true
+      {
+        printf 'schema_sha=%s\n' "$schema_sha"
+        printf 'expiry=%s\n' "$((fetch_now + fetch_cache_ttl))"
+      } > "$fetch_cache_meta" 2>/dev/null || true
+      umask "$umask_save"
+    fi
+  else
+    log "  schema-fetch cache hit (TTL ${fetch_cache_ttl}s, schema sha8 ${schema_sha:0:8})"
+  fi
 
   if [ "$fetch_rc" -eq 1 ] && [ -z "$fetch_output" ]; then
     # Schema parse error: the helper printed nothing useful and exited 1.
@@ -1609,6 +1657,43 @@ materialize_mcp_env_files() {
   else
     log "  materialized $count MCP env file(s) to $out_dir (all op:// refs pre-resolved)"
   fi
+}
+
+# Cache the GitHub App private key to tmpfs so gh-app-token.sh can mint
+# installation tokens without an op-read per re-mint. The private key
+# rotates ~yearly; the installation-token mint cycle is hourly. Without
+# this cache, every gh-app-token cache miss costs one op-read.
+#
+# Bootstrap calls this AFTER fetch_coo_secrets has populated
+# GITHUB_APP_PRIVATE_KEY in process env. Writes to a tmpfs path
+# gh-app-token.sh checks before its own op-read fallback.
+#
+# Same Phase-2-spirit posture as materialize_mcp_env_files: in-memory,
+# container-ephemeral, 0600 file inside 0700 dir.
+materialize_app_key_cache() {
+  local key="${GITHUB_APP_PRIVATE_KEY:-}"
+  if [ -z "$key" ]; then
+    log "  materialize_app_key_cache: GITHUB_APP_PRIVATE_KEY not in env; skip"
+    return 0
+  fi
+
+  local cache_dir
+  if [ -d /dev/shm ] && [ -w /dev/shm ]; then
+    cache_dir="/dev/shm/coo-app-key-cache"
+  else
+    cache_dir="/tmp/coo-app-key-cache"
+  fi
+
+  mkdir -p "$cache_dir" 2>/dev/null || true
+  chmod 0700 "$cache_dir" 2>/dev/null || true
+
+  local umask_save; umask_save="$(umask)"
+  umask 0177
+  printf '%s' "$key" > "$cache_dir/private_key" 2>/dev/null || true
+  umask "$umask_save"
+
+  export VADE_APP_KEY_CACHE_DIR="$cache_dir"
+  log "  materialized App private key to $cache_dir/private_key"
 }
 
 # Write non-secret COO identifier vars into ~/.claude/settings.json "env".

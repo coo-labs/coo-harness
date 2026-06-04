@@ -361,6 +361,14 @@ merge_coo_settings_paths
 COO_BOOTSTRAP_STEP="materialize_mcp_env_files"
 materialize_mcp_env_files
 
+# Cache the GitHub App private key to tmpfs so gh-app-token.sh's installation-
+# token mints don't cost an op-read per re-mint. App private key rotates
+# yearly; installation tokens last 1 hour; the GitHub App token cache already
+# amortizes mints but each cache-miss currently costs 1 op-read of the App
+# private key. Tmpfs cache eliminates that per-mint cost for the session.
+COO_BOOTSTRAP_STEP="materialize_app_key_cache"
+materialize_app_key_cache
+
 COO_BOOTSTRAP_STEP="summarize_coo_identity"
 summarize_coo_identity
 

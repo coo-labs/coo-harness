@@ -64,6 +64,20 @@ fi
 if [ -z "$install_id" ]; then
   install_id="$(op read 'op://COO/vade-coo-app/installation_id' 2>/dev/null || true)"
 fi
+# Phase 2 follow-up: check tmpfs cache populated by bootstrap's
+# materialize_app_key_cache before falling back to op-read. The cache is
+# in-memory tmpfs, written once at boot, container-ephemeral. Avoids 1
+# op-read per gh-app-token cache miss (which was previously the only
+# op-read in the App-token mint hot path after the installation-token
+# cache landed).
+if [ -z "$private_key" ]; then
+  for cache_path in /dev/shm/coo-app-key-cache/private_key /tmp/coo-app-key-cache/private_key; do
+    if [ -r "$cache_path" ]; then
+      private_key="$(cat "$cache_path" 2>/dev/null || true)"
+      [ -n "$private_key" ] && break
+    fi
+  done
+fi
 if [ -z "$private_key" ]; then
   private_key="$(op read 'op://COO/vade-coo-app/private_key' 2>/dev/null || true)"
 fi
