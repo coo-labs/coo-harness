@@ -45,7 +45,22 @@ cmd="$(printf '%s' "$input" | jq -r '.tool_input.command // ""' 2>/dev/null || t
 # ── Block op item edit / gh secret set outside the rotation skill ─────────────
 # The rotation skill sets VADE_SECRETS_SKILL_ACTIVE=1 for its own writes.
 # Direct use of these commands outside the skill bypasses the audit trail.
-if [ "${VADE_SECRETS_SKILL_ACTIVE:-}" != "1" ]; then
+#
+# Two allow paths:
+#   1. Env-level flag set by the skill harness:
+#        VADE_SECRETS_SKILL_ACTIVE=1 in the hook's process env.
+#   2. Command-line flag matching the canonical skill pattern:
+#        `VADE_SECRETS_SKILL_ACTIVE=1 op item edit ...` (inline) or
+#        `(export VADE_SECRETS_SKILL_ACTIVE=1; op item edit ...)` (subshell).
+#      The flag is visible in the command transcript — audit trail preserved.
+#
+# Path 2 closes the gap noted on 2026-06-04: Claude Code's PreToolUse hook
+# runs in the agent process env, which doesn't inherit the inline `VAR=val`
+# of the spawned Bash command — so path 1 only works when the agent itself
+# has the env set (e.g., via settings.json::env or a skill-harness wrapper),
+# not when an in-session bash call uses the documented subshell pattern.
+if [ "${VADE_SECRETS_SKILL_ACTIVE:-}" != "1" ] && \
+   ! printf '%s' "$cmd" | grep -qE '(^|[[:space:];(])VADE_SECRETS_SKILL_ACTIVE=1([[:space:];)]|$)'; then
   case "$cmd" in
     *"op item edit"*|*"op item update"*)
       jq -n '{
