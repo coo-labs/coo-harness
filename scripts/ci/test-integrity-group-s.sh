@@ -15,8 +15,9 @@
 #   - S3: declared container_env mirror present in synthetic
 #         settings.json → ok; mirror file absent → fail.
 #   - S4: skip in CI fake-env (documents the skip path).
-#   - S5: synthetic sanctioned path with secret-shape match → ok;
-#         empty/no-match sanctioned path → fail.
+#   - S5 (Phase 2 polarity, coo-memory#873): synthetic settings.json
+#         secret-free + coo-env absent → ok; settings.json env block
+#         with a secret-shape match → fail; coo-env present → fail.
 #   - S7: skip in CI fake-env (documents the skip path).
 #   - S8: env classification — known alias goes to declared_secret;
 #         unknown allowlisted prefix → prefix_allowlist; injected
@@ -238,64 +239,55 @@ _run_invariant S4 "$S4_DIR" env VADE_BINDIR_OVERRIDE=/tmp
 _assert_skip S4 "skips in CI fake-env (no live op)"
 _assert_detail_contains "op CLI" "S4 skip detail mentions op CLI"
 
-printf '\n== S5: sanctioned paths carry expected secret shapes ==\n'
+printf '\n== S5: no plaintext secrets in settings.json; coo-env retired (Phase 2) ==\n'
 
-# S5 reads literal /root/* paths — in CI these don't exist. Pre-stage
-# alternate paths and override via $VADE_RUNTIME_DIR /
-# $VADE_COO_MEMORY_DIR so the coo-harness/coo-memory paths resolve to
-# our fixtures. The literal /root/* paths fall into the "absent (not
-# required on this host)" bucket, which is fine.
+# Phase 2 polarity (coo-memory#873): the S5 helper reads literal
+# /root/.claude/settings.json and /root/.vade/coo-env. For tests, the
+# helper honors $VADE_S5_SETTINGS_JSON_OVERRIDE and
+# $VADE_S5_COO_ENV_OVERRIDE so we can point at staged fixtures.
 
+# Test A — happy path: settings.json secret-free, coo-env absent → ok.
 S5_DIR="$TEST_ROOT/s5-clean"
 _stage_memory "$S5_DIR" >/dev/null
-# Stage a coo-harness-shape and a coo-memory-shape directory; only
-# the common.sh path needs to carry a secret-shape match per the
-# sanctioned-paths list.
-mkdir -p "$S5_DIR/coo-harness/scripts/lib"
-cat > "$S5_DIR/coo-harness/scripts/lib/common.sh" <<EOF
-# Synthetic common.sh that carries one matching secret shape.
-# Token below matches the github-classic-pat regex from fixture.
-SOME_TOKEN="ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-EOF
-mkdir -p "$S5_DIR/coo-memory/.claude"
-# Token below matches ghp_ + 36 alphanumeric chars (the github-classic-pat regex).
-cat > "$S5_DIR/coo-memory/.claude/settings.json" <<EOF
-{"env": {"FOO": "ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}
+mkdir -p "$S5_DIR/claude"
+cat > "$S5_DIR/claude/settings.json" <<EOF
+{"env": {"GITHUB_APP_ID": "999000", "VADE_RUNTIME_DIR": "/home/user/coo-harness"}}
 EOF
 _run_invariant S5 "$S5_DIR" env \
   VADE_BINDIR_OVERRIDE=/tmp \
-  VADE_RUNTIME_DIR="$S5_DIR/coo-harness" \
-  VADE_COO_MEMORY_DIR="$S5_DIR/coo-memory"
-# We expect "ok" — at least one sanctioned-path file has a regex hit.
-# The fixture references $VADE_COO_MEMORY_DIR/operations/secrets/schema.yaml,
-# but _run_invariant overrides $VADE_COO_MEMORY_DIR to $S5_DIR/coo-memory
-# AFTER staging; re-run S5 with the schema located under the same dir.
-# Stage the fixture inside coo-memory subtree as well so the helper finds it.
-mkdir -p "$S5_DIR/coo-memory/operations/secrets"
-_render_fixture "$S5_DIR/coo-memory/operations/secrets/schema.yaml" "$S5_DIR/coo-memory"
-cp "$S5_DIR/operations/secrets/schema.schema.json" "$S5_DIR/coo-memory/operations/secrets/" 2>/dev/null || true
-_run_invariant S5 "$S5_DIR" env \
-  VADE_BINDIR_OVERRIDE=/tmp \
-  VADE_RUNTIME_DIR="$S5_DIR/coo-harness" \
-  VADE_COO_MEMORY_DIR="$S5_DIR/coo-memory"
-_assert_ok S5 "sanctioned path carries secret shape"
+  VADE_S5_SETTINGS_JSON_OVERRIDE="$S5_DIR/claude/settings.json" \
+  VADE_S5_COO_ENV_OVERRIDE="$S5_DIR/coo-env-absent"
+_assert_ok S5 "settings.json secret-free and coo-env absent"
 
-S5_DIR="$TEST_ROOT/s5-empty"
+# Test B — settings.json env block contains a secret-shape match → fail.
+# Token below matches ghp_ + 36 alphanumeric chars (github-classic-pat regex).
+S5_DIR="$TEST_ROOT/s5-secret-in-settings"
 _stage_memory "$S5_DIR" >/dev/null
-mkdir -p "$S5_DIR/coo-harness/scripts/lib" "$S5_DIR/coo-memory/operations/secrets"
-# common.sh exists but contains NO secret-shape matches.
-cat > "$S5_DIR/coo-harness/scripts/lib/common.sh" <<EOF
-# Synthetic common.sh that carries no secret-shape matches.
-echo "just regular shell code"
+mkdir -p "$S5_DIR/claude"
+cat > "$S5_DIR/claude/settings.json" <<EOF
+{"env": {"GITHUB_MCP_PAT": "ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}
 EOF
-_render_fixture "$S5_DIR/coo-memory/operations/secrets/schema.yaml" "$S5_DIR/coo-memory"
-cp "$S5_DIR/operations/secrets/schema.schema.json" "$S5_DIR/coo-memory/operations/secrets/" 2>/dev/null || true
 _run_invariant S5 "$S5_DIR" env \
   VADE_BINDIR_OVERRIDE=/tmp \
-  VADE_RUNTIME_DIR="$S5_DIR/coo-harness" \
-  VADE_COO_MEMORY_DIR="$S5_DIR/coo-memory"
-_assert_fail S5 "sanctioned path with no secret-shape match fails"
-_assert_detail_contains "common.sh" "S5 surfaces the empty path"
+  VADE_S5_SETTINGS_JSON_OVERRIDE="$S5_DIR/claude/settings.json" \
+  VADE_S5_COO_ENV_OVERRIDE="$S5_DIR/coo-env-absent"
+_assert_fail S5 "settings.json env values contain plaintext secret"
+_assert_detail_contains "settings.json" "S5 surfaces the settings.json violation"
+
+# Test C — coo-env file present → fail.
+S5_DIR="$TEST_ROOT/s5-coo-env-present"
+_stage_memory "$S5_DIR" >/dev/null
+mkdir -p "$S5_DIR/claude"
+cat > "$S5_DIR/claude/settings.json" <<EOF
+{"env": {"GITHUB_APP_ID": "999000"}}
+EOF
+echo "export GITHUB_MCP_PAT=ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" > "$S5_DIR/coo-env"
+_run_invariant S5 "$S5_DIR" env \
+  VADE_BINDIR_OVERRIDE=/tmp \
+  VADE_S5_SETTINGS_JSON_OVERRIDE="$S5_DIR/claude/settings.json" \
+  VADE_S5_COO_ENV_OVERRIDE="$S5_DIR/coo-env"
+_assert_fail S5 "coo-env file present (Phase 2: should be retired)"
+_assert_detail_contains "coo-env" "S5 surfaces the coo-env violation"
 
 printf '\n== S7: orphan-pattern detection (CI fake-env skip path) ==\n'
 

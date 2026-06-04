@@ -462,7 +462,10 @@ s_check_S5() {
   # allow/deny lists, hook command strings) contains long strings that
   # intentionally match secret_shapes patterns (e.g. the cloudflare pattern
   # '[A-Za-z0-9_-]{40}' matches many base64/hex strings in command paths).
-  local sj="/root/.claude/settings.json"
+  # Path is overridable via $VADE_S5_SETTINGS_JSON_OVERRIDE for test fixtures
+  # (CI fake-env, integrity-group-s test harness); production uses the literal
+  # /root path.
+  local sj="${VADE_S5_SETTINGS_JSON_OVERRIDE:-/root/.claude/settings.json}"
   if [ -f "$sj" ] && command -v node >/dev/null 2>&1; then
     checks=$((checks + 1))
     local env_values
@@ -508,7 +511,8 @@ s_check_S5() {
   fi
 
   # Check 2: /root/.vade/coo-env must NOT exist (retired by Phase 2).
-  local coo_env="/root/.vade/coo-env"
+  # Path is overridable via $VADE_S5_COO_ENV_OVERRIDE for test fixtures.
+  local coo_env="${VADE_S5_COO_ENV_OVERRIDE:-/root/.vade/coo-env}"
   checks=$((checks + 1))
   if [ -f "$coo_env" ]; then
     violations+=("coo-env exists at $coo_env (Phase 2: should be absent)")
