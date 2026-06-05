@@ -4,9 +4,15 @@
 # CLAUDE_CODE_SESSION_ID). Silent no-op outside Claude Code: empty
 # stdout, exit 0.
 #
-# Used by the coo-harness gh-coo-wrap wrapper as the URL source, and
-# by humans / scripts that need the URL ad-hoc — e.g. inside an
+# Used by humans / scripts that need the URL ad-hoc — e.g. inside an
 # editor body, a heredoc, or a manual MCP call.
+#
+# Canonical-call exception: gh-coo-wrap.sh inlines the same derivation
+# (search "session URL once" in that file) to avoid a fork+exec on
+# every attributable `gh` write. The two sites must stay in sync — any
+# change to the sid resolution / cse_ stripping / URL shape here must
+# also update gh-coo-wrap.sh, and vice versa. coo-labs/coo-harness#341
+# recorded this convention.
 #
 # Source: issue coo-labs/coo-memory#150; MEMO 2026-04-26-02.
 
