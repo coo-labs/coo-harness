@@ -370,6 +370,58 @@ else
   _add D6 false "vade-coo-{auth,sign} keys missing in $HOME/.ssh"
 fi
 
+# D7 — op-read failure surface (coo-harness#451)
+# Counts events in ~/.vade/op-read-failures.jsonl over a rolling window.
+# Each event is one _op_to_file call that either failed outright or took
+# >1s wall time (i.e., burned at least one retry). The metric for #451's
+# success criterion ("zero retries over 7-day window") rolls up from
+# this file across the cloud-session fleet.
+#
+# Probe is `true` when:
+#   - no events in window (clean), or
+#   - events present but rc=0 across the board (slow but recoverable);
+#     surfaced as a non-blocking detail so operators can see the cost.
+# Probe is `false` when any event has rc!=0 — that's an
+# install_coo_ssh_keys-class FAIL that wasted bootstrap wall time and
+# may have triggered a retry-bootstrap cycle.
+D7_log="${HOME}/.vade/op-read-failures.jsonl"
+D7_window_h="${VADE_D7_WINDOW_H:-24}"
+if [ -f "$D7_log" ] && check_cmd python3; then
+  D7_summary="$(python3 -c "
+import json, datetime
+window_h = ${D7_window_h}
+cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=window_h)
+total = 0; fails = 0; total_ms = 0
+try:
+    with open('$D7_log') as f:
+        for line in f:
+            try: ev = json.loads(line)
+            except Exception: continue
+            try: t = datetime.datetime.strptime(ev.get('ts',''),'%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc)
+            except Exception: continue
+            if t < cutoff: continue
+            total += 1
+            if ev.get('rc') != 0: fails += 1
+            try: total_ms += int(ev.get('elapsed_ms',0) or 0)
+            except Exception: pass
+except Exception: pass
+print(f'{total}|{fails}|{total_ms}')
+" 2>/dev/null || echo "0|0|0")"
+  D7_total="${D7_summary%%|*}"
+  _D7_rest="${D7_summary#*|}"
+  D7_fails="${_D7_rest%%|*}"
+  D7_ms="${_D7_rest#*|}"
+  if [ "$D7_total" = "0" ]; then
+    _add D7 true "no op-read events in last ${D7_window_h}h"
+  elif [ "$D7_fails" = "0" ]; then
+    _add D7 true "${D7_total} slow op-read event(s) in last ${D7_window_h}h, 0 failed (${D7_ms}ms cumulative); see $D7_log"
+  else
+    _add D7 false "${D7_fails}/${D7_total} op-read event(s) failed in last ${D7_window_h}h (${D7_ms}ms cumulative wall-time cost); see $D7_log"
+  fi
+else
+  _add D7 true "no op-read-failures.jsonl (clean steady state)"
+fi
+
 # ── Group E: MCP surface ─────────────────────────────────────
 # Phase gate. `fast` (the boot-path call from coo-bootstrap's exit
 # trap) marks E1–E9 as `pending` and skips the live probes entirely,
