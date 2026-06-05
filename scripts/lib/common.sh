@@ -2,11 +2,14 @@
 # Shared functions for VADE environment setup scripts.
 # Sourced by bootstrap.sh (devcontainer) and cloud-setup.sh (web).
 
-log() { echo "[vade-setup] $*"; }
-
-# Stderr-only variant so the message doesn't pollute stdout captures.
-# Used inside retry loops where the caller wraps us in $(...) to grab
-# a secret off stdout.
+# Status messages from setup scripts go to stderr, not stdout. SessionStart
+# hooks capture stdout into the agent's persisted-output digest; routing
+# `log` through stderr keeps boot chatter (29+ lines per coo-bootstrap run,
+# plus session-start-sync.sh, etc.) out of context while preserving the
+# meaningful digest banners (which `echo` to stdout directly). Shell
+# convention: stderr for logs, stdout for data. `log_err` is kept as an
+# alias for callers that document a stderr-only intent explicitly.
+log() { echo "[vade-setup] $*" >&2; }
 log_err() { echo "[vade-setup] $*" >&2; }
 
 # Persistent bootstrap log. Every coo-bootstrap invocation appends one
