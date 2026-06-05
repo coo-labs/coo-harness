@@ -25,22 +25,6 @@
           {
             "type": "command",
             "command": "bash \"$VADE_COO_MEMORY_DIR/.claude/_lib/memo-index.sh\""
-          },
-          {
-            "type": "command",
-            "command": "bash \"$VADE_RUNTIME_DIR/scripts/lifecycle/coo-identity-digest.sh\""
-          },
-          {
-            "type": "command",
-            "command": "bash \"$VADE_RUNTIME_DIR/scripts/lifecycle/discussions-digest.sh\""
-          },
-          {
-            "type": "command",
-            "command": "bash \"$VADE_RUNTIME_DIR/scripts/lifecycle/project-board-digest.sh\""
-          },
-          {
-            "type": "command",
-            "command": "bash \"$VADE_RUNTIME_DIR/scripts/lifecycle/session-idle-watchdog.sh\" --start"
           }
         ]
       },

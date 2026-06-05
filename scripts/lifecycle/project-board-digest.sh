@@ -18,7 +18,9 @@ source "$SCRIPT_DIR/../lib/common.sh"
 boot_log_record project-board-digest start
 trap '_rc=$?; boot_log_record project-board-digest end $([ $_rc -eq 0 ] && echo ok || echo fail) rc=$_rc' EXIT
 
-wait_for_coo_bootstrap 60
+# wait_for_coo_bootstrap removed: this script now runs as an ordered
+# child of coo-bootstrap.sh via post-bootstrap-chain.sh; bootstrap's
+# env is in place by the time we sample the token.
 
 TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-${GITHUB_MCP_PAT:-}}}"
 if [ -z "$TOKEN" ]; then

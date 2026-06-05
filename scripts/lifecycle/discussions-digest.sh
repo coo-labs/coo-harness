@@ -17,11 +17,9 @@ source "$SCRIPT_DIR/../lib/common.sh"
 boot_log_record discussions-digest start
 trap '_rc=$?; boot_log_record discussions-digest end $([ $_rc -eq 0 ] && echo ok || echo fail) rc=$_rc' EXIT
 
-# SessionStart hooks run in parallel; coo-bootstrap may still be
-# writing ~/.vade/coo-env when we reach the TOKEN check below. Wait
-# for a fresh bootstrap terminal state before sampling env (no-op and
-# fast-exits when bootstrap isn't running).
-wait_for_coo_bootstrap 60
+# wait_for_coo_bootstrap removed: this script now runs as an ordered
+# child of coo-bootstrap.sh via post-bootstrap-chain.sh; bootstrap's
+# env is in place by the time we sample the token.
 
 TOKEN="${GITHUB_TOKEN:-${GITHUB_MCP_PAT:-}}"
 if [ -z "$TOKEN" ]; then

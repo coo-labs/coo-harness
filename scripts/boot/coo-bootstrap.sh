@@ -67,16 +67,21 @@ except Exception as e:
     esac
   fi
 
-  # ── Hoisted integrity-check + finalize signal ─────────────────────
-  # Refresh integrity-check.json here, at the END of coo-bootstrap, so
-  # the JSON reflects FINAL post-bootstrap state instead of a parallel-
-  # hook mid-bootstrap snapshot. coo-identity-digest.sh runs in parallel
-  # under the SessionStart:startup matcher; previously its own integrity-
-  # check call observed bootstrap state mid-mutation and surfaced false-
-  # positive BOOT DEGRADED banners on otherwise-green boots. The digest
-  # now polls for the per-session finalize sentinel below before reading
-  # the JSON.
-  bash "$VADE_RUNTIME_DIR/scripts/boot/integrity-check.sh" >/dev/null 2>&1 || true
+  # ── Fast integrity-check + post-bootstrap chain ─────────────────
+  # The boot integrity check runs here, at bootstrap's tail, in fast
+  # phase only (Group E live network probes are deferred to the
+  # background pass kicked off by post-bootstrap-chain.sh). Then the
+  # ordered chain of bootstrap-dependent hooks (digest → discussions
+  # → project-board → idle-watchdog → live integrity-check) runs as
+  # children of this process — they no longer race coo-bootstrap as
+  # parallel SessionStart:startup siblings. See post-bootstrap-chain.sh.
+  VADE_INTEGRITY_PHASE=fast \
+    bash "$VADE_RUNTIME_DIR/scripts/boot/integrity-check.sh" >/dev/null 2>&1 || true
+  bash "$VADE_RUNTIME_DIR/scripts/boot/post-bootstrap-chain.sh" || true
+
+  # Sentinel retained for back-compat with any external consumer that
+  # still polls it. Boot-path consumers (digest, discussions-digest,
+  # project-board-digest) read the JSON directly now.
   mkdir -p "$HOME/.vade" 2>/dev/null || true
   printf '%s\n' "${CLAUDE_CODE_SESSION_ID:-unknown}" \
     > "$HOME/.vade/.coo-bootstrap-finalized" 2>/dev/null || true
