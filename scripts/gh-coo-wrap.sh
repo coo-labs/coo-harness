@@ -54,6 +54,12 @@ if [ -z "$REAL_GH" ] || [ ! -x "$REAL_GH" ]; then
 fi
 
 # Compute session URL once. Empty if outside Claude Code.
+#
+# This derivation is inlined from coo-harness/scripts/coo-session-url.sh
+# (the canonical single-shot script) rather than shelled out — every
+# attributable `gh` write would otherwise pay a fork+exec on the hot
+# path. Convention recorded in coo-labs/coo-harness#341: any change to
+# sid resolution / cse_ stripping / URL shape must update both sites.
 sid="${CLAUDE_CODE_REMOTE_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}"
 SESSION_URL=""
 [ -n "$sid" ] && SESSION_URL="https://claude.ai/code/session_${sid#cse_}"
