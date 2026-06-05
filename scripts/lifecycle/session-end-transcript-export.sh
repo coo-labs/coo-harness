@@ -87,7 +87,7 @@ _resolve_transcript_secrets() {
   _maybe_set R2_TRANSCRIPTS_ENDPOINT          op://COO/r2-transcripts/endpoint
   _maybe_set R2_TRANSCRIPTS_BUCKET            op://COO/r2-transcripts/bucket
   _maybe_set TRANSCRIPTS_AGE_IDENTITY         op://COO/transcripts-age-key/credential
-  _maybe_set GITHUB_MCP_PAT                   op://COO/vade-coo-self-2026-04/token
+  _maybe_set GITHUB_MCP_PAT                   op://COO/github-pat-vade-coo/token
 }
 _resolve_transcript_secrets
 

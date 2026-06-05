@@ -43,19 +43,19 @@ case "${1:-}" in
   read)
     ref="${2:-}"
     case "$ref" in
-      "op://COO/vade-coo-self-2026-04/token")
+      "op://COO/github-pat-vade-coo/token")
         echo "ghp_CIMOCK00000000000000000000000000000000"
         ;;
-      "op://COO/GITHUB_PUBLIC_PAT/credential")
+      "op://COO/github-pat-classic-public/credential")
         # Mocked cross-org public-repo PAT (MEMO-2026-05-11-6xv2). Classic
         # `ghp_` prefix; placeholder body so disk content scanners don't
         # match a real-shape token.
         echo "ghp_CIMOCK_PUBLIC_PAT_DO_NOT_USE_000000"
         ;;
-      "op://COO/agentmail-vade-coo/credential")
+      "op://COO/agentmail-api-vade-coo/credential")
         echo "am_CIMOCK_AGENTMAIL_KEY_DO_NOT_USE"
         ;;
-      "op://COO/mem0-vade-coo/credential")
+      "op://COO/mem0-api-vade-coo/credential")
         echo "m0_CIMOCK_MEM0_KEY_DO_NOT_USE"
         ;;
       "op://COO/r2-transcripts/access-key-id")
@@ -74,7 +74,7 @@ case "${1:-}" in
         # and never decrypts a real ciphertext.
         echo "AGE-SECRET-KEY-1CIMOCK000000000000000000000000000000000000000000000000"
         ;;
-      "op://COO/vade-canvas-coo/credential")
+      "op://COO/vade-canvas-bearer-coo/credential")
         # Mocked vade-canvas MCP bearer (vade-core#93). Real value is the
         # operator-shaped opaque bearer that vade-canvas MCP accepts via
         # Fly's VADE_AUTH_TOKENS.agents[]; mock returns a non-shape
@@ -82,32 +82,32 @@ case "${1:-}" in
         # canvas roundtrip.
         echo "vat_CIMOCK_VADE_AUTH_TOKEN_DO_NOT_USE"
         ;;
-      "op://COO/vade-coo-auth/private key")
+      "op://COO/vade-coo-ssh-auth/private key")
         cat "$KEYDIR/vade-coo-auth"
         ;;
-      "op://COO/vade-coo-auth/public key")
+      "op://COO/vade-coo-ssh-auth/public key")
         cat "$KEYDIR/vade-coo-auth.pub"
         ;;
-      "op://COO/vade-coo-sign/private key")
+      "op://COO/vade-coo-ssh-sign/private key")
         cat "$KEYDIR/vade-coo-sign"
         ;;
-      "op://COO/vade-coo-sign/public key")
+      "op://COO/vade-coo-ssh-sign/public key")
         cat "$KEYDIR/vade-coo-sign.pub"
         ;;
-      "op://COO/cloudflare-api-token-vade-coo/account_id")
+      "op://COO/cloudflare-api-vade-coo/account_id")
         # Mocked Cloudflare account ID (non-secret public identifier).
         echo "0000000000000000000000000000cimock"
         ;;
-      "op://COO/vade-coo-app/app_id")
+      "op://COO/github-app-vade-coo/app_id")
         # GitHub App ID (vade-coo-memory#837) — canned numeric for the
         # CI mode. Real value is set in production via Ven's UI work
-        # (Phase 1) and stored in op://COO/vade-coo-app/app_id.
+        # (Phase 1) and stored in op://COO/github-app-vade-coo/app_id.
         echo "999000"
         ;;
-      "op://COO/vade-coo-app/installation_id")
+      "op://COO/github-app-vade-coo/installation_id")
         echo "888777"
         ;;
-      "op://COO/vade-coo-app/private_key")
+      "op://COO/github-app-vade-coo/private_key")
         # Placeholder PEM-shaped string for CI. fetch_coo_secrets only
         # checks for non-empty; the minter (gh-app-token.sh) is not on
         # the bootstrap-regression hot path, so this body is never

@@ -292,7 +292,7 @@ if [ -n "${OP_SERVICE_ACCOUNT_TOKEN_BACKUP:-}" ]; then
   # non-zero exit so `set -e` doesn't trip on the command substitution.
   _sentinel_out=""
   _sentinel_rc=0
-  _sentinel_out="$(op read 'op://COO/vade-coo-auth/public key' 2>&1 >/dev/null)" || _sentinel_rc=$?
+  _sentinel_out="$(op read 'op://COO/vade-coo-ssh-auth/public key' 2>&1 >/dev/null)" || _sentinel_rc=$?
   if [ "$_sentinel_rc" -ne 0 ] && printf '%s' "$_sentinel_out" | grep -qiE 'rate.?limit|too many requests'; then
     log "coo-bootstrap: standard SA token rate-limited on op read; swapping to OP_SERVICE_ACCOUNT_TOKEN_BACKUP"
     export OP_SERVICE_ACCOUNT_TOKEN="$OP_SERVICE_ACCOUNT_TOKEN_BACKUP"

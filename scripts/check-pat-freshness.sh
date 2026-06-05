@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # check-pat-freshness: detect whether the gh-coo-wrap PAT cache (tmpfs)
 # is current relative to the canonical value in 1Password
-# (op://COO/vade-coo-self-2026-04/token per schema.yaml).
+# (op://COO/github-pat-vade-coo/token per schema.yaml).
 #
 # Use this as the FIRST response when a `gh` write fails silently:
 # exit 1, zero bytes stdout, zero bytes stderr. That signature is the
@@ -41,7 +41,7 @@ set -eu
 # diagnostic path; a schema-fetch dependency would create a chicken-
 # and-egg loop when the schema itself is what we're testing the cache
 # against.
-OP_REF="op://COO/vade-coo-self-2026-04/token"
+OP_REF="op://COO/github-pat-vade-coo/token"
 
 # tmpfs cache location used by gh-coo-wrap.sh _resolve_pat MCP branch.
 # XDG_RUNTIME_DIR is the cloud-container default; fall back to /tmp

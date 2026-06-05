@@ -842,7 +842,7 @@ PY
 # ── S9: shim-vs-schema cross-check ────────────────────────────────
 #
 # Origin: 2026-06-05 secrets-epic close-out (MEMO-2026-06-05-v5qk).
-# The Ven-found bug `op://COO/GITHUB_PUBLIC_PAT/token` in gh-coo-wrap.sh
+# The Ven-found bug (op://COO/GITHUB_PUBLIC_PAT, /token vs /credential) in gh-coo-wrap.sh
 # (schema declared `credential`; shim hardcoded `token`; silently
 # returned empty) was invisible to S1–S8 because each S-check inspects
 # either the schema OR the live op-state in isolation. S9 closes the
