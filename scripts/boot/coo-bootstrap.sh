@@ -282,6 +282,15 @@ if [ -n "${OP_SERVICE_ACCOUNT_TOKEN_BACKUP:-}" ]; then
       exit 1
     fi
     log "coo-bootstrap: BACKUP SA token active"
+    # Persist the swap for the rest of the session. The op-coo-wrap shim
+    # (installed by session-start-sync.sh ensure_op_coo_wrap, runs before
+    # this hook) reads this marker on every `op` invocation to choose the
+    # active token. Without this, every Bash-tool subprocess would re-probe
+    # the rate-limit on its first op-read. Tmpfs, container-ephemeral.
+    _op_pref_dir="${XDG_RUNTIME_DIR:-/tmp}/coo-op-wrap"
+    mkdir -p "$_op_pref_dir" 2>/dev/null || true
+    chmod 0700 "$_op_pref_dir" 2>/dev/null || true
+    printf B > "$_op_pref_dir/active" 2>/dev/null || true
     # Auto-append BACKUP's identity to the allowlist on first successful
     # swap. Authorization signal is the operator setting the BACKUP env
     # var; this avoids a FATAL on the identity-check immediately below

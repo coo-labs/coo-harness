@@ -1395,6 +1395,42 @@ ensure_gh_coo_wrap() {
   log "gh-coo-wrap: installed (wrapper at $gh_path, real binary at $real_path)"
 }
 
+# Install the op-coo-wrap shim at /home/user/.local/bin/op so every
+# `op` invocation gets transparent rate-limit fallback between
+# OP_SERVICE_ACCOUNT_TOKEN and OP_SERVICE_ACCOUNT_TOKEN_BACKUP. The
+# real op binary moves to /home/user/.local/bin/op-real.
+#
+# Closes the gap left by coo-bootstrap's in-process swap, which
+# doesn't propagate to subsequent Bash-tool subprocesses. Same
+# install pattern as ensure_gh_coo_wrap; marker grep keeps it
+# idempotent. Cloud-only path guard (root + /home/user); macOS/local
+# uses brew/system op and is left untouched.
+ensure_op_coo_wrap() {
+  [ "$(id -u)" = "0" ] && [ -d /home/user ] || return 0
+  local op_path="/home/user/.local/bin/op"
+  local real_path="/home/user/.local/bin/op-real"
+  local wrapper_src="${1:-}"
+  if [ -z "$wrapper_src" ] || [ ! -f "$wrapper_src" ]; then
+    log "op-coo-wrap: source script missing; skipping"
+    return 0
+  fi
+  if [ ! -x "$op_path" ]; then
+    log "op-coo-wrap: $op_path missing; skipping (ensure_op_cli installs op)"
+    return 0
+  fi
+  if grep -q 'COO-OP-COO-WRAP-MARKER-v1' "$op_path" 2>/dev/null; then
+    install -m 0755 "$wrapper_src" "$op_path"
+    return 0
+  fi
+  if [ ! -x "$real_path" ]; then
+    mv "$op_path" "$real_path"
+  else
+    rm -f "$op_path"
+  fi
+  install -m 0755 "$wrapper_src" "$op_path"
+  log "op-coo-wrap: installed (wrapper at $op_path, real binary at $real_path)"
+}
+
 # Fetch COO secrets from 1Password via a schema-driven iterator.
 #
 # Reads operations/secrets/schema.yaml (Track 4 Phase 1 refactor,
