@@ -891,18 +891,24 @@ s_check_S9() {
   fi
 
   # Build the allowed-set: every credentials[].op_item × (op_field ∪
-  # op_alt_fields[]) pair. Emit one `<item>|<field>` line per pair.
-  # Filters out the placeholder op_items that contain `(` (e.g.
-  # "(env-only — ...)", "(none — minted from ...)") since those are
-  # not real 1P items and no script should op-read them anyway.
+  # op_alt_fields[]) pair, emitted as `<item>|<field>` lines. Filters
+  # out placeholder op_items containing `(` (e.g. "(env-only — ...)",
+  # "(none — minted from ...)") — not real 1P items, never op-read.
+  #
+  # Two passes (op_field, then op_alt_fields) rather than one
+  # comma-union expression: mikefarah yq drops the iterated second
+  # branch of a `A, (B[] | C)` union (verified v4.44.3) while python-yq
+  # keeps it, so the union form silently lost every op_alt_field under
+  # the Go yq — a false-positive on the SSH "public key" paths in any
+  # environment running mikefarah (CI, notably). The two-pass form is
+  # byte-identical across both implementations.
   local allowed
-  allowed="$(yq -r '
-    .credentials[]
-    | select(.op_item | test("^[^(]") )
-    | . as $c
-    | ($c.op_item + "|" + $c.op_field),
-      ( ($c.op_alt_fields // [])[] | ($c.op_item + "|" + .) )
-  ' "$schema" 2>/dev/null | sort -u)" || allowed=""
+  allowed="$(
+    {
+      yq -r '.credentials[] | select(.op_item | test("^[^(]")) | .op_item + "|" + .op_field' "$schema" 2>/dev/null
+      yq -r '.credentials[] | select(.op_item | test("^[^(]")) | .op_item as $i | .op_alt_fields[]? | $i + "|" + .' "$schema" 2>/dev/null
+    } | sort -u
+  )" || allowed=""
 
   if [ -z "$allowed" ]; then
     _add S9 skip "schema produced no op-paths to cross-check (parse failure?)"
@@ -915,12 +921,6 @@ s_check_S9() {
   #   - **/ci/mocks/**              (CI op-mocks with synthetic responses)
   #   - **/_archive/**              (historical, not live)
   #   - comment lines (^[[:space:]]*#)   — doc/example refs are not bugs
-  # Item char class allows colon (e.g. "Service Account Auth Token:
-  # vade-coo"), period (date stamps), space (none today, but safe),
-  # underscore, hyphen, alnum. Field char class allows space (SSH keys
-  # use "private key" / "public key"), underscore, hyphen, alnum.
-  # `<`, `>`, `$`, `{`, `}`, `*`, backtick are excluded — those signal
-  # documentation placeholders, not real op-paths.
   local raw_lines found
   raw_lines="$(grep -rEhn 'op://COO/' "$scripts_root" \
     --include='*.sh' --include='*.py' \
@@ -928,12 +928,29 @@ s_check_S9() {
     --exclude-dir='mocks' --exclude-dir='_archive' \
     2>/dev/null)" || raw_lines=""
   # Strip the leading `<linenum>:` from each grep hit, drop comment
-  # lines, then extract op://COO/<item>/<field> tokens with the tight
-  # char classes. Sort+uniq for dedup.
+  # lines, then extract op://COO/<item>/<field> tokens. Sort+uniq dedup.
+  #
+  # Field-boundary discipline (the quoted/unquoted split below) closes a
+  # false-positive class. A 1P field may legitimately contain a space —
+  # the SSH items declare "private key" / "public key" — but such fields
+  # are ALWAYS quoted in the corpus, since an unquoted space would
+  # terminate the shell word. So two alternatives, longest-match:
+  #   1. Quoted    ['"]op://COO/<item>/<field with spaces>['"]
+  #      — field may contain spaces; the closing quote bounds the match.
+  #   2. Unquoted  op://COO/<item>/<field>
+  #      — field is [A-Za-z0-9_-]+, NO space. A trailing " 2>/dev/null"
+  #        or "|| echo failed" is the next shell token, not the field;
+  #        an earlier ( [word])? tail ate it and mis-reported
+  #        "<field> 2" / "<field> failed" as schema drift (the S9
+  #        false-positive class fixed here).
+  # Item char class allows colon ("Service Account Auth Token: vade-coo"),
+  # period (date stamps), space, underscore, hyphen, alnum. `<`,`>`,`$`,
+  # `{`,`}`,`*`,backtick stay excluded — documentation-placeholder shapes.
   found="$(printf '%s\n' "$raw_lines" \
     | sed -E 's/^[0-9]+://' \
     | awk '/^[[:space:]]*#/ { next } { print }' \
-    | grep -oE "op://COO/[A-Za-z0-9 _:.-]+/[A-Za-z0-9_-]+( [A-Za-z0-9_-]+)?" \
+    | grep -oE "['\"]op://COO/[A-Za-z0-9 _:.-]+/[A-Za-z0-9_ -]+['\"]|op://COO/[A-Za-z0-9 _:.-]+/[A-Za-z0-9_-]+" \
+    | sed -E "s/^['\"]//; s/['\"]$//" \
     | sed -E 's/[[:space:]]+$//' \
     | sort -u)" || found=""
 

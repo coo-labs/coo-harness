@@ -22,6 +22,10 @@
 #   - S8: env classification — known alias goes to declared_secret;
 #         unknown allowlisted prefix → prefix_allowlist; injected
 #         token-shape value on an unknown name → unknown_secret_shape.
+#   - S9: shim-vs-schema op-path cross-check — clean corpus (incl. the
+#         unquoted-path + redirect / error-string over-capture
+#         regression and quoted space-fields) → ok; undeclared field →
+#         fail. Forces the live (non-fake-env) path via env -u.
 #
 # Skips:
 #   - S4 + S7 live `op` integration is exercised in the cloud session
@@ -361,6 +365,62 @@ line="$(printf '%s\n' "$out_s8b" | grep -E '^S8\|' | head -1)"
 _LAST_KEY="${line%%|*}"; rest="${line#*|}"; _LAST_OK="${rest%%|*}"; _LAST_DETAIL="${rest#*|}"
 _assert_fail S8 "unknown_secret_shape on injected token-shaped value"
 _assert_detail_contains "SOME_UNKNOWN_VAR" "S8 names the offending key"
+
+printf '\n== S9: shim-vs-schema op-path cross-check ==\n'
+
+# S9 reads the schema's credentials[] and greps a scripts corpus for
+# op://COO/<item>/<field> refs, flagging any not declared. It runs only
+# in a live (non-CI-fake) env, so these cases clear VADE_BINDIR_OVERRIDE
+# / VADE_CI_WORKSPACE_ROOT (which would force the fake-env skip) and
+# route schema + scripts root at dedicated synthetic fixtures.
+mkdir -p "$TEST_ROOT/s9-mem"
+S9_SCHEMA="$TEST_ROOT/s9-schema.yaml"
+cat > "$S9_SCHEMA" <<'EOF'
+schema_version: 1
+vault: COO
+credentials:
+  - id: s9-pat
+    op_item: s9-pat
+    op_field: token
+  - id: s9-ssh
+    op_item: s9-ssh
+    op_field: private key
+    op_alt_fields:
+      - public key
+EOF
+
+# Clean corpus encodes the regression. Line 1 is an UNQUOTED op-path
+# followed by `2>/dev/null`; line 2 an error string ending "... failed";
+# both previously over-captured as "token 2" / "token failed". The
+# quoted space-field paths must still resolve. All four refs are
+# declared → S9 must report ok=true.
+S9_CLEAN="$TEST_ROOT/s9-corpus-clean"
+mkdir -p "$S9_CLEAN"
+cat > "$S9_CLEAN/wired.sh" <<'EOF'
+#!/usr/bin/env bash
+val="$(op read op://COO/s9-pat/token 2>/dev/null || true)"
+echo "error: op read op://COO/s9-pat/token failed" >&2
+_op_to_file "op://COO/s9-ssh/private key" /tmp/auth
+pub="$(op read 'op://COO/s9-ssh/public key')"
+EOF
+_run_invariant S9 "$TEST_ROOT/s9-mem" env -u VADE_BINDIR_OVERRIDE -u VADE_CI_WORKSPACE_ROOT \
+  VADE_SECRETS_SCHEMA="$S9_SCHEMA" \
+  VADE_SECRETS_S9_SCRIPTS_ROOT="$S9_CLEAN"
+_assert_ok S9 "unquoted-path+redirect / error-string / quoted space-field all resolve (no over-capture)"
+
+# Drift corpus: a genuinely undeclared field must still be flagged —
+# the fix must not blunt S9's detection.
+S9_DRIFT="$TEST_ROOT/s9-corpus-drift"
+mkdir -p "$S9_DRIFT"
+cat > "$S9_DRIFT/wired.sh" <<'EOF'
+#!/usr/bin/env bash
+val="$(op read op://COO/s9-pat/wrongfield 2>/dev/null)"
+EOF
+_run_invariant S9 "$TEST_ROOT/s9-mem" env -u VADE_BINDIR_OVERRIDE -u VADE_CI_WORKSPACE_ROOT \
+  VADE_SECRETS_SCHEMA="$S9_SCHEMA" \
+  VADE_SECRETS_S9_SCRIPTS_ROOT="$S9_DRIFT"
+_assert_fail S9 "undeclared op-path field is flagged as drift"
+_assert_detail_contains "s9-pat/wrongfield" "S9 names the drifted path"
 
 printf '\n== Summary ==\n'
 printf 'Total: %d pass, %d fail\n' "$PASS" "$FAIL"
