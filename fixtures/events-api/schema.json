@@ -1,0 +1,120 @@
+{
+  "$comment": [
+    "Observed-schema reference for claude.ai/v1/sessions/<sid>/events.",
+    "Derived from the 2026-06-05 probe on session_0146dWU8wPHNwLyNLLJLuTYL ",
+    "(3438 events, 9 distinct types). This is a descriptive snapshot, not a ",
+    "validation schema — the future probe under lib/transcripts/events/probe.py ",
+    "will assert against this and surface drift. Maintain in lockstep with ",
+    "lib/transcripts/events/translator.py (when it lands)."
+  ],
+  "transport": {
+    "host": "claude.ai",
+    "path": "/v1/sessions/<sid>/events",
+    "method": "GET",
+    "required_headers": {
+      "anthropic-beta": "ccr-byoc-2025-07-29",
+      "anthropic-client-feature": "ccr",
+      "anthropic-client-platform": "web_claude_ai",
+      "anthropic-version": "2023-06-01",
+      "x-organization-uuid": "<operator-specific>"
+    },
+    "query_params": {
+      "limit": "int, page size (observed up to 500)",
+      "after_id": "string, cursor — set to response.last_id on subsequent pages; omit on first page"
+    },
+    "auth": "cookie (credentials: include)",
+    "notes": [
+      "Without the CCR header gate, the route 404s on the bare path and 400s ",
+      "on un-gated queries (the generic /v1 list-handler validator only ",
+      "accepts created_at[*], limit, order, page, types[] — a different ",
+      "endpoint family).",
+      "The org_uuid is per-operator, captured from any in-flight request to ",
+      "this endpoint in DevTools Network tab; not derivable from session id."
+    ]
+  },
+  "response_envelope": {
+    "data": "Event[]",
+    "first_id": "string — first event's id in the page",
+    "last_id": "string — last event's id; pass as ?after_id= for next page",
+    "has_more": "bool — false on last page"
+  },
+  "event_types_observed": {
+    "$comment": "All counts from session_0146dWU8wPHNwLyNLLJLuTYL (3438 events).",
+    "user": {
+      "count": 249,
+      "fields": ["client_platform", "created_at", "file_attachments", "isSynthetic", "message", "parent_tool_use_id", "session_id", "timestamp", "tool_use_result", "type", "uuid"],
+      "message.content shapes": {
+        "string": 54,
+        "list[tool_result]": 191,
+        "list[text]": 2,
+        "list[image, text]": 2
+      },
+      "notes": "Operator-typed turns + tool_result echoes. image blocks are events-only — local jsonl doesn't carry upload metadata in the same shape."
+    },
+    "assistant": {
+      "count": 494,
+      "fields": ["created_at", "message", "parent_tool_use_id", "request_id", "session_id", "type", "uuid"],
+      "message.content block types": {"thinking": 166, "text": 137, "tool_use": 191},
+      "notes": "Same content block shape as local jsonl. thinking blocks carry the encoded `signature` field for Anthropic's verifiable thinking."
+    },
+    "system": {
+      "count": 2427,
+      "fields": ["agents", "analytics_disabled", "apiKeySource", "claude_code_version", "created_at", "cwd", "decision_reason_type", "description", "estimated_tokens", "estimated_tokens_delta", "exit_code", "fast_mode_state", "hook_event", "hook_id", "hook_name", "mcp_servers", "message", "model", "needs_action", "outcome", "output", "output_file", "output_style", "patch", "permissionMode", "plugins", "product_feedback_disabled", "session_id", "skills", "slash_commands", "startup_timing", "status", "status_category", "status_detail", "stderr", "stdout", "subtype", "summarizes_uuid", "summary", "task_id", "task_type", "tool_name", "tool_use_id", "tools", "type", "uuid"],
+      "top subtypes": {
+        "thinking_tokens": 1206,
+        "PreToolUse:Bash hook_started": 354,
+        "PreToolUse:Bash hook_response": 354,
+        "PostToolUse:Bash hook_started": 111,
+        "PostToolUse:Bash hook_response": 111,
+        "init": 51,
+        "post_turn_summary": 49,
+        "task_started": 28,
+        "task_notification": 28,
+        "PreToolUse:Write hook_started": 23
+      },
+      "notes": "Kitchen sink — hook lifecycle, thinking-token streaming, session init metadata, sub-agent task lifecycle. The init subtype carries cwd, claude_code_version, mcp_servers, skills, slash_commands, plugins — strictly richer than the local jsonl session header."
+    },
+    "env_manager_log": {
+      "count": 128,
+      "fields": ["created_at", "data", "type", "uuid"],
+      "notes": "Container provisioning telemetry — sandbox alloc, clone steps, setup_script execution, cc start. data.category ∈ {init, ...}; data.extra.step_id ∈ {provision, clone, setup_script, start_cc, ...}. Not in local jsonl."
+    },
+    "result": {
+      "count": 51,
+      "fields": ["api_error_status", "created_at", "duration_api_ms", "duration_ms", "errors", "fast_mode_state", "is_error", "modelUsage", "num_turns", "origin", "permission_denials", "result", "session_id", "stop_reason", "subtype", "terminal_reason", "total_cost_usd", "ttft_ms", "type", "usage", "uuid"],
+      "notes": "Per-turn telemetry. modelUsage keyed by model id (e.g. 'claude-opus-4-7[1m]') with cacheCreationInputTokens, cacheReadInputTokens, costUSD, inputTokens, outputTokens, webSearchRequests. The richest token-accounting signal in the events stream."
+    },
+    "tool_progress": {
+      "count": 42,
+      "fields": ["created_at", "elapsed_time_seconds", "parent_tool_use_id", "session_id", "task_id", "tool_name", "tool_use_id", "type", "uuid"],
+      "notes": "Streaming progress updates for long-running tool calls. Useful for the renderer if it wants to show 'bash running, elapsed 3s'; not load-bearing for archival fidelity."
+    },
+    "control_request": {
+      "count": 18,
+      "fields": ["created_at", "request", "request_id", "type", "uuid"],
+      "notes": "Session control plane (e.g. request.subtype='rename_session'). Drop for translator unless we want to surface session-rename history."
+    },
+    "control_response": {
+      "count": 17,
+      "fields": ["created_at", "response", "type", "uuid"],
+      "notes": "Response counterpart to control_request, paired by request_id."
+    },
+    "rate_limit_event": {
+      "count": 12,
+      "fields": ["created_at", "rate_limit_info", "session_id", "type", "uuid"],
+      "notes": "Rate-limit telemetry (resetsAt, overageStatus, rateLimitType ∈ {five_hour, ...}). Not in local jsonl. Useful for substrate observability, not for renderer fidelity."
+    }
+  },
+  "translator_targets": {
+    "$comment": "What lib/transcripts/events/translator.py should preserve when mapping events → renderer-compatible synthetic jsonl.",
+    "renderer_compatible": ["user", "assistant", "system"],
+    "telemetry_preservation": ["env_manager_log", "result", "rate_limit_event"],
+    "ignorable_for_v1": ["tool_progress", "control_request", "control_response"],
+    "renderer_v3_schema_field_sources": {
+      "first_user_uuid": "first event with type='user' and isSynthetic≠true → uuid",
+      "models": "set of result.modelUsage keys ∪ system event 'model' field",
+      "cwds": "set of system events whose subtype='init' → cwd",
+      "cc_version": "first system event with claude_code_version set"
+    }
+  }
+}
