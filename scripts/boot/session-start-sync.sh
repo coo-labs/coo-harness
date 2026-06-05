@@ -85,7 +85,9 @@ ensure_op_coo_wrap "$SCRIPT_DIR/../op-coo-wrap.sh"
 # (no PAT at build time, etc.). Fail-open: if gh/PAT missing or refresh
 # fails, F6 falls back to its own "cache absent" skip path.
 prewarm_external_touch_cache "$WORKSPACE_ROOT_DERIVED" 24
-# integrity-check.sh runs in coo-identity-digest.sh instead of here,
-# so the check fires after the platform's repo-sync has settled
-# (coo-harness#XXX; moved from here to eliminate boot-time false alarms).
+# integrity-check.sh runs from coo-bootstrap.sh's EXIT trap, not here
+# and not from coo-identity-digest.sh. coo-bootstrap is the last hook in
+# the SessionStart:startup chain to mutate state, so deferring the check
+# to its tail eliminates the parallel-hook race that previously surfaced
+# stale BOOT DEGRADED banners on otherwise-green boots.
 boot_log_record session-start-sync end ok

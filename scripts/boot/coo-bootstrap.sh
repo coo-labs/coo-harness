@@ -66,6 +66,21 @@ except Exception as e:
         ;;
     esac
   fi
+
+  # ── Hoisted integrity-check + finalize signal ─────────────────────
+  # Refresh integrity-check.json here, at the END of coo-bootstrap, so
+  # the JSON reflects FINAL post-bootstrap state instead of a parallel-
+  # hook mid-bootstrap snapshot. coo-identity-digest.sh runs in parallel
+  # under the SessionStart:startup matcher; previously its own integrity-
+  # check call observed bootstrap state mid-mutation and surfaced false-
+  # positive BOOT DEGRADED banners on otherwise-green boots. The digest
+  # now polls for the per-session finalize sentinel below before reading
+  # the JSON.
+  bash "$VADE_RUNTIME_DIR/scripts/boot/integrity-check.sh" >/dev/null 2>&1 || true
+  mkdir -p "$HOME/.vade" 2>/dev/null || true
+  printf '%s\n' "${CLAUDE_CODE_SESSION_ID:-unknown}" \
+    > "$HOME/.vade/.coo-bootstrap-finalized" 2>/dev/null || true
+
   return $rc
 }
 trap _on_exit EXIT

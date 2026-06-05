@@ -74,10 +74,29 @@ SKIP_SENTINEL="${HOME}/.vade/.coo-bootstrap-skip-reason"
 # unmissable; combined with CLAUDE.md step 1 reading the JSON file,
 # the agent's first action on a degraded boot is surface-to-BDFL.
 #
-# Run integrity-check FIRST so the file we read below reflects this
-# session. Original position (after Mem0 banner) eliminated to avoid
-# duplication.
-bash "$VADE_RUNTIME_DIR/scripts/boot/integrity-check.sh" || true
+# Wait for coo-bootstrap.sh's per-session finalize sentinel before
+# reading the JSON. Both hooks run in parallel under SessionStart:startup;
+# without this sync the JSON we read below would reflect mid-bootstrap
+# state and produce stale BOOT DEGRADED banners on otherwise-green boots.
+# coo-bootstrap.sh runs integrity-check.sh at the tail of its EXIT trap
+# and writes the sentinel containing CLAUDE_CODE_SESSION_ID; we match on
+# that to avoid picking up a stale sentinel from a prior session.
+_wait_for_bootstrap_finalized() {
+  local sentinel="$HOME/.vade/.coo-bootstrap-finalized"
+  local our_session="${CLAUDE_CODE_SESSION_ID:-unknown}"
+  local timeout="${VADE_DIGEST_BOOTSTRAP_TIMEOUT:-60}"
+  local waited=0
+  while [ "$waited" -lt "$timeout" ]; do
+    if [ -f "$sentinel" ] \
+       && [ "$(cat "$sentinel" 2>/dev/null || true)" = "$our_session" ]; then
+      return 0
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  return 1
+}
+_wait_for_bootstrap_finalized || true
 
 _integrity_ok="unknown"
 _integrity_passed="?"
@@ -141,7 +160,7 @@ if [ "$_integrity_ok" = "false" ] || [ -f "$SKIP_SENTINEL" ]; then
   echo "  Proven recovery (from 2026-05-13 audit recovery-transcript.txt):"
   echo "    1) git config --file \$HOME/.gitconfig --remove-section user  # clear non-COO gitconfig"
   echo "    2) CLAUDE_CODE_REMOTE=true bash \$VADE_RUNTIME_DIR/scripts/boot/coo-bootstrap.sh"
-  echo "    3) bash \$VADE_RUNTIME_DIR/scripts/boot/integrity-check.sh"
+  echo "       (auto-runs integrity-check at exit; no separate verification step needed)"
   echo "    (Phase 2: coo-env retired; no source step needed)"
   if [[ ",$_integrity_degraded," == *",D4,"* ]]; then
     echo ""
@@ -548,13 +567,13 @@ echo "                            Do NOT add GH_TOKEN=\$GITHUB_MCP_PAT — it de
 echo "                            shim. harness github MCP writes deny-listed (#112 S1)."
 echo "───────────────────────────────────────────────────────────────"
 
-# Note: integrity-check.sh runs at the TOP of the digest now (see
-# the INTEGRITY-CHECK BANNER block above), so the integrity-check.json
-# file is already current by the time this section reads it. Original
-# placement here (after Mem0 banner) was removed by Phase A of
-# coo-memory#762; the integrity-check fires after session-start-sync
-# anyway because this whole script runs after session-start-sync in the
-# SessionStart hook chain.
+# Note: integrity-check.sh runs from coo-bootstrap.sh's EXIT trap.
+# The TOP-of-digest wait (_wait_for_bootstrap_finalized) blocks until
+# that trap has fired for this session, so integrity-check.json is
+# current by the time any block in this script reads it. The previous
+# in-digest invocation (Phase A of coo-memory#762) raced coo-bootstrap
+# under SessionStart:startup parallelism and surfaced stale BOOT
+# DEGRADED banners on otherwise-green boots.
 
 # Mem0 read/write surface — same banner pattern as "GitHub write surface"
 # above. Per coo-harness#109, the hosted Mem0 MCP at mcp.mem0.ai hits
