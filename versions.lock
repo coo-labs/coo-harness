@@ -121,15 +121,36 @@ boto3               >=1.34,<2 # AWS SDK for Python. Used by
                               # silently break the script via API
                               # change. uv resolves on first run; cache
                               # warm afterward.
-PyYAML              >=6.0     # YAML loader. Used by
-                              # coo-memory/bin/secrets-schema-check.py
-                              # (S1 invariant validator, run via
-                              # `uv run --script` per its PEP 723
-                              # metadata) and by the inline python3
-                              # heredoc in
+PyYAML              6.0.2     # YAML loader. Two install paths now:
+                              # (a) `uv run --script` consumers (e.g.
+                              # coo-memory/bin/secrets-schema-check.py,
+                              # the S1 validator) resolve PyYAML via
+                              # their PEP 723 metadata into UV_CACHE_DIR;
+                              # (b) system-python3 consumers
+                              # (scripts/boot/schema-fetch-secrets.py,
+                              # scripts/hooks/boot-brake-guard.py,
+                              # skill-yaml-guard.sh, bash-token-guard.sh,
+                              # preuse-agent-env-scrub.sh,
+                              # postuse-bash-redactor.sh, the inline
+                              # python3 heredoc in
                               # scripts/lib/integrity-group-s.sh's S8
-                              # env-drift classifier. >=6.0 for the
-                              # unified safe_load API.
+                              # env-drift classifier) resolve via system
+                              # site-packages. The Debian base image
+                              # currently ships python3-yaml=6.0.1-2build2
+                              # under /usr/lib/python3/dist-packages,
+                              # satisfying (b); ensure_pyyaml in
+                              # scripts/lib/common.sh defensively installs
+                              # this exact pin to
+                              # /home/user/.local/lib/python3.X/site-packages
+                              # at build time (snapshot-persistent),
+                              # short-circuiting when (b) is already
+                              # importable. PYTHONUSERBASE=/home/user/.local
+                              # in settings.json env (via
+                              # _write_claude_settings_paths) lets
+                              # resume-time hooks find the install without
+                              # sourcing common.sh. Defensive pin against
+                              # a future base-image rebuild dropping
+                              # python3-yaml — coo-harness#440.
 jsonschema          >=4.0     # JSON Schema validator (Draft 2020-12).
                               # Used by
                               # coo-memory/bin/secrets-schema-check.py
