@@ -31,6 +31,27 @@ if [ -f "${HOME}/.vade/coo-env" ]; then
   . "${HOME}/.vade/coo-env" 2>/dev/null || true
 fi
 
+# Phase 2 (coo-memory#873) retired ~/.vade/coo-env. Resolve required
+# secrets at call time via op read — routed through op-coo-wrap
+# (coo-harness#443), so 1P SA-token rate-limit between primary and
+# OP_SERVICE_ACCOUNT_TOKEN_BACKUP is absorbed transparently. Render
+# needs the R2 PUT pair; AGE + PAT included for parity with the
+# export wrapper if a future render mode grows to need them.
+_resolve_transcript_secrets() {
+  command -v op >/dev/null 2>&1 || return 0
+  _maybe_set() {
+    local var="$1" ref="$2" val
+    eval "test -n \"\${$var:-}\"" && return 0
+    val="$(op read "$ref" 2>/dev/null)" || return 0
+    [ -n "$val" ] && export "$var=$val"
+  }
+  _maybe_set R2_TRANSCRIPTS_ACCESS_KEY_ID     op://COO/r2-transcripts/access-key-id
+  _maybe_set R2_TRANSCRIPTS_SECRET_ACCESS_KEY op://COO/r2-transcripts/secret-access-key
+  _maybe_set R2_TRANSCRIPTS_ENDPOINT          op://COO/r2-transcripts/endpoint
+  _maybe_set R2_TRANSCRIPTS_BUCKET            op://COO/r2-transcripts/bucket
+}
+_resolve_transcript_secrets
+
 LOG_DIR="${HOME}/.vade/transcript-render-logs"
 mkdir -p "$LOG_DIR" 2>/dev/null || true
 
