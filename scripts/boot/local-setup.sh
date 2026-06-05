@@ -55,7 +55,7 @@ sync_claude_config "$WORKSPACE_ROOT/coo-harness/.claude" "$WORKSPACE_ROOT/.claud
 # from data-owning repos into the workspace .claude/ via per-file
 # symlinks. Source order = priority; first-wins on name conflicts.
 # coo-harness is listed first because plumbing (settings.json hooks,
-# tagging-taxonomy, agentmail) shouldn't lose to a same-named primitive
+# agentmail) shouldn't lose to a same-named primitive
 # in a data repo. Repo list is loaded from scripts/aggregator.yml so
 # future joins are a config edit, not a script change (coo-memory#952).
 mapfile -t _AGGREGATOR_REPOS < <(load_aggregator_repos)
