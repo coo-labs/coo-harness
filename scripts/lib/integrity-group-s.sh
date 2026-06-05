@@ -86,21 +86,26 @@ s_check_S1() {
     _add S1 skip "secrets-schema-check.py not found at $validator"
     return
   fi
-  if ! command -v python3 >/dev/null 2>&1; then
-    _add S1 skip "python3 not available"
-    return
-  fi
-  # Dependency check — PyYAML + jsonschema. If missing, skip cleanly
-  # (the Track 1a CI installs them; the cloud container has them; CI
-  # fake-env mode without them should not fail S1).
-  if ! python3 -c 'import yaml, jsonschema' >/dev/null 2>&1; then
-    _add S1 skip "PyYAML or jsonschema not importable in python3 — install with pip"
-    return
-  fi
-
+  # Prefer `uv run --script` if available — the validator carries PEP 723
+  # inline metadata declaring PyYAML + jsonschema as dependencies, so uv
+  # resolves them transparently (warm-cache after first run). Falls back
+  # to plain python3 + import probe if uv is absent (CI fake-env mode
+  # without uv stays clean by skipping).
   local out rc
-  out="$(python3 "$validator" "$schema" --schema "$schemajson" 2>&1)"
-  rc=$?
+  if command -v uv >/dev/null 2>&1; then
+    out="$(uv run --script "$validator" "$schema" --schema "$schemajson" 2>&1)"
+    rc=$?
+  elif command -v python3 >/dev/null 2>&1; then
+    if ! python3 -c 'import yaml, jsonschema' >/dev/null 2>&1; then
+      _add S1 skip "uv unavailable AND PyYAML/jsonschema not importable in python3 — install uv or pip-install both"
+      return
+    fi
+    out="$(python3 "$validator" "$schema" --schema "$schemajson" 2>&1)"
+    rc=$?
+  else
+    _add S1 skip "neither uv nor python3 available"
+    return
+  fi
   if [ "$rc" -eq 0 ]; then
     _add S1 true "schema.yaml validates clean against schema.schema.json"
   else
@@ -413,7 +418,24 @@ s_check_S4() {
     [ -z "$cred_id" ] && continue
     total=$((total + 1))
     local raw stale_label stale_value
-    raw="$(op item get --format=json "$op_item" 2>/dev/null || true)"
+    # --vault COO required: service accounts refuse unqualified `op item get`
+    # ("a vault query must be provided when this command is called by a
+    # service account"). The pre-2026-06-05 S4 code omitted --vault and
+    # every item read failed silently, reporting all multi-field items as
+    # "unreadable via op (transient)" — masking the real S4 failure mode
+    # the invariant exists to catch.
+    raw="$(op item get --vault COO --format=json "$op_item" 2>/dev/null || true)"
+    # Schema-side known-exception: if op_field_notes for this credential
+    # contains the marker "S4-known-stale-empty", skip the check. Used
+    # for known-empty fields whose deletion is queued (op-side delete
+    # blocked by SA rate-limit or permission scope). Marker is a literal
+    # string, must appear in the .op_field_notes block to take effect.
+    local notes_marker
+    notes_marker="$(yq -r --arg op "$op_item" '.credentials[] | select(.op_item == $op) | .op_field_notes // ""' "$schema" 2>/dev/null | grep -c 'S4-known-stale-empty' || true)"
+    if [ "${notes_marker:-0}" -gt 0 ]; then
+      total=$((total - 1))  # exclude from total so the count stays meaningful
+      continue
+    fi
     if [ -z "$raw" ]; then
       unreadable=$((unreadable + 1))
       continue
@@ -817,6 +839,122 @@ PY
   fi
 }
 
+# ── S9: shim-vs-schema cross-check ────────────────────────────────
+#
+# Origin: 2026-06-05 secrets-epic close-out (MEMO-2026-06-05-v5qk).
+# The Ven-found bug `op://COO/GITHUB_PUBLIC_PAT/token` in gh-coo-wrap.sh
+# (schema declared `credential`; shim hardcoded `token`; silently
+# returned empty) was invisible to S1–S8 because each S-check inspects
+# either the schema OR the live op-state in isolation. S9 closes the
+# gap by cross-checking the script corpus's `op://COO/<item>/<field>`
+# references against the schema's declared `credentials[].op_item ×
+# (op_field ∪ op_alt_fields)` pairs.
+#
+# Exclusions per scope: test fixtures and CI mocks legitimately
+# contain synthetic op-paths (e.g. `scripts/ci/mocks/op` has the
+# stubbed responses; `scripts/ci/test-*.sh` parrot the shim's paths
+# for fixture purposes). False-positives on these would make S9
+# noisy without catching real bugs.
+s_check_S9() {
+  local schema; schema="$(_s_schema_yaml)"
+  if [ ! -f "$schema" ]; then
+    _add S9 skip "schema.yaml not found at $schema"
+    return
+  fi
+  if ! command -v yq >/dev/null 2>&1; then
+    _add S9 skip "yq not available"
+    return
+  fi
+
+  # Resolve the scripts root. Default to the shipped coo-harness checkout;
+  # tests can override via $VADE_SECRETS_S9_SCRIPTS_ROOT.
+  local scripts_root
+  scripts_root="${VADE_SECRETS_S9_SCRIPTS_ROOT:-${VADE_RUNTIME_DIR:-/home/user/coo-harness}/scripts}"
+  if [ ! -d "$scripts_root" ]; then
+    _add S9 skip "scripts root not found at $scripts_root"
+    return
+  fi
+
+  # Build the allowed-set: every credentials[].op_item × (op_field ∪
+  # op_alt_fields[]) pair. Emit one `<item>|<field>` line per pair.
+  # Filters out the placeholder op_items that contain `(` (e.g.
+  # "(env-only — ...)", "(none — minted from ...)") since those are
+  # not real 1P items and no script should op-read them anyway.
+  local allowed
+  allowed="$(yq -r '
+    .credentials[]
+    | select(.op_item | test("^[^(]") )
+    | . as $c
+    | ($c.op_item + "|" + $c.op_field),
+      ( ($c.op_alt_fields // [])[] | ($c.op_item + "|" + .) )
+  ' "$schema" 2>/dev/null | sort -u)" || allowed=""
+
+  if [ -z "$allowed" ]; then
+    _add S9 skip "schema produced no op-paths to cross-check (parse failure?)"
+    return
+  fi
+
+  # Grep the scripts corpus for op://COO/<item>/<field> references.
+  # Exclude:
+  #   - **/test-*.sh / test-*.py    (test fixtures)
+  #   - **/ci/mocks/**              (CI op-mocks with synthetic responses)
+  #   - **/_archive/**              (historical, not live)
+  #   - comment lines (^[[:space:]]*#)   — doc/example refs are not bugs
+  # Item char class allows colon (e.g. "Service Account Auth Token:
+  # vade-coo"), period (date stamps), space (none today, but safe),
+  # underscore, hyphen, alnum. Field char class allows space (SSH keys
+  # use "private key" / "public key"), underscore, hyphen, alnum.
+  # `<`, `>`, `$`, `{`, `}`, `*`, backtick are excluded — those signal
+  # documentation placeholders, not real op-paths.
+  local raw_lines found
+  raw_lines="$(grep -rEhn 'op://COO/' "$scripts_root" \
+    --include='*.sh' --include='*.py' \
+    --exclude='test-*.sh' --exclude='test-*.py' \
+    --exclude-dir='mocks' --exclude-dir='_archive' \
+    2>/dev/null)" || raw_lines=""
+  # Strip the leading `<linenum>:` from each grep hit, drop comment
+  # lines, then extract op://COO/<item>/<field> tokens with the tight
+  # char classes. Sort+uniq for dedup.
+  found="$(printf '%s\n' "$raw_lines" \
+    | sed -E 's/^[0-9]+://' \
+    | awk '/^[[:space:]]*#/ { next } { print }' \
+    | grep -oE "op://COO/[A-Za-z0-9 _:.-]+/[A-Za-z0-9_-]+( [A-Za-z0-9_-]+)?" \
+    | sed -E 's/[[:space:]]+$//' \
+    | sort -u)" || found=""
+
+  if [ -z "$found" ]; then
+    # No op-paths found in scripts — green by absence (everything goes
+    # through the schema-driven fetcher).
+    _add S9 true "no hardcoded op://COO/ paths in scripts (schema-driven only)"
+    return
+  fi
+
+  # For each found <item>/<field>, check membership in allowed-set.
+  local bad=() checked=0
+  local item field key
+  while IFS= read -r ref; do
+    [ -z "$ref" ] && continue
+    checked=$((checked + 1))
+    # Strip the op://COO/ prefix and split on the LAST slash so item
+    # names containing slashes (none today, but future-proof) work.
+    local rest="${ref#op://COO/}"
+    item="${rest%/*}"
+    field="${rest##*/}"
+    key="${item}|${field}"
+    if ! printf '%s\n' "$allowed" | grep -qFx "$key"; then
+      bad+=("${item}/${field}")
+    fi
+  done <<< "$found"
+
+  if [ "${#bad[@]}" -eq 0 ]; then
+    _add S9 true "$checked op://COO/ refs in scripts all map to schema credentials[].(op_field|op_alt_fields[])"
+  else
+    # De-dup the bad list (multiple files can reference the same bad path).
+    local uniq_bad; uniq_bad="$(printf '%s\n' "${bad[@]}" | sort -u | tr '\n' ',' | sed 's/,$//')"
+    _add S9 false "shim/script op-paths not in schema: $(_s_trunc "$uniq_bad")"
+  fi
+}
+
 # Dispatch every S invariant. Called from integrity-check.sh.
 s_check_all() {
   s_check_S1
@@ -826,4 +964,5 @@ s_check_all() {
   s_check_S5
   s_check_S7
   s_check_S8
+  s_check_S9
 }
