@@ -64,11 +64,16 @@ from pathlib import Path
 # Update this map when a new multi-field credential with env_aliases is added.
 # ---------------------------------------------------------------------------
 MULTI_FIELD_MAP = {
-    # r2-transcripts: primary field is secret-access-key (→ SECRET_ACCESS_KEY),
-    # alt field access-key-id (→ ACCESS_KEY_ID) is also fetched and exported.
+    # r2-transcripts: two-secret + two-public-config credential. The two
+    # non-secret fields (endpoint, bucket) are exported alongside the
+    # secret pair so the consumer scripts (session-end-transcript-export,
+    # transcript-pull-local) read all four from process env without a
+    # per-script op-read.
     "r2-transcripts": [
-        ("access-key-id",    "R2_TRANSCRIPTS_ACCESS_KEY_ID"),
-        ("secret-access-key","R2_TRANSCRIPTS_SECRET_ACCESS_KEY"),
+        ("access-key-id",     "R2_TRANSCRIPTS_ACCESS_KEY_ID"),
+        ("secret-access-key", "R2_TRANSCRIPTS_SECRET_ACCESS_KEY"),
+        ("endpoint",          "R2_TRANSCRIPTS_ENDPOINT"),
+        ("bucket",            "R2_TRANSCRIPTS_BUCKET"),
     ],
     # cloudflare-api-vade-coo: primary field is credential (→ CLOUDFLARE_API_TOKEN),
     # alt field account_id (→ CLOUDFLARE_ACCOUNT_ID) is public but
