@@ -3,6 +3,7 @@
 # requires-python = ">=3.10"
 # dependencies = ["boto3>=1.34,<2"]
 # ///
+# migration-sweep: skip — this script handles the org-rename URL backfill; its mapping table and regexes intentionally carry vade-app/* and coo-labs/* literals.
 """
 transcript-url-backfill.py — coo-labs/coo-console#23 (post-comment algorithm).
 
