@@ -532,8 +532,8 @@ fi
 case "${1:-}" in
   read)
     case "${2:-}" in
-      "op://COO/vade-coo-self-2026-04/token") echo "OPRESOLVED_MCP_PAT_FROM_STUB" ;;
-      "op://COO/GITHUB_PUBLIC_PAT/token")     echo "OPRESOLVED_PUBLIC_PAT_FROM_STUB" ;;
+      "op://COO/vade-coo-self-2026-04/token")      echo "OPRESOLVED_MCP_PAT_FROM_STUB" ;;
+      "op://COO/GITHUB_PUBLIC_PAT/credential")     echo "OPRESOLVED_PUBLIC_PAT_FROM_STUB" ;;
       *) echo "[mock op] unknown ref: ${2:-}" >&2; exit 2 ;;
     esac
     ;;
