@@ -380,11 +380,17 @@ fi
 # Probe is `true` when:
 #   - no events in window (clean), or
 #   - events present but rc=0 across the board (slow but recoverable);
-#     surfaced as a non-blocking detail so operators can see the cost.
-# Probe is `false` when any event has rc!=0 — that's an
-# install_coo_ssh_keys-class FAIL that wasted bootstrap wall time and
-# may have triggered a retry-bootstrap cycle.
+#     surfaced as a non-blocking detail so operators can see the cost, or
+#   - events with rc!=0 present BUT the last recorded bootstrap line
+#     in ~/.vade/coo-bootstrap.log is `OK step=complete` — the retry
+#     path absorbed the failure and bootstrap completed cleanly. That
+#     is recoverable noise, not a degraded boot. Surfaced as detail so
+#     operators can still see the cost.
+# Probe is `false` when rc!=0 events are present AND the last bootstrap
+# line is not `OK step=complete` — that's an install_coo_ssh_keys-class
+# FAIL that wasn't (yet) recovered, and the boot is actually degraded.
 D7_log="${HOME}/.vade/op-read-failures.jsonl"
+D7_boot_log="${HOME}/.vade/coo-bootstrap.log"
 D7_window_h="${VADE_D7_WINDOW_H:-24}"
 if [ -f "$D7_log" ] && check_cmd python3; then
   D7_summary="$(python3 -c "
@@ -405,18 +411,32 @@ try:
             try: total_ms += int(ev.get('elapsed_ms',0) or 0)
             except Exception: pass
 except Exception: pass
-print(f'{total}|{fails}|{total_ms}')
-" 2>/dev/null || echo "0|0|0")"
+recovered = 0
+try:
+    last = ''
+    with open('$D7_boot_log') as f:
+        for line in f:
+            if line.strip():
+                last = line.strip()
+    if 'OK step=complete' in last:
+        recovered = 1
+except Exception: pass
+print(f'{total}|{fails}|{total_ms}|{recovered}')
+" 2>/dev/null || echo "0|0|0|0")"
   D7_total="${D7_summary%%|*}"
   _D7_rest="${D7_summary#*|}"
   D7_fails="${_D7_rest%%|*}"
-  D7_ms="${_D7_rest#*|}"
+  _D7_rest="${_D7_rest#*|}"
+  D7_ms="${_D7_rest%%|*}"
+  D7_recovered="${_D7_rest#*|}"
   if [ "$D7_total" = "0" ]; then
     _add D7 true "no op-read events in last ${D7_window_h}h"
   elif [ "$D7_fails" = "0" ]; then
     _add D7 true "${D7_total} slow op-read event(s) in last ${D7_window_h}h, 0 failed (${D7_ms}ms cumulative); see $D7_log"
+  elif [ "$D7_recovered" = "1" ]; then
+    _add D7 true "${D7_fails}/${D7_total} op-read event(s) failed in last ${D7_window_h}h but bootstrap recovered (${D7_ms}ms cumulative wall-time cost); see $D7_log"
   else
-    _add D7 false "${D7_fails}/${D7_total} op-read event(s) failed in last ${D7_window_h}h (${D7_ms}ms cumulative wall-time cost); see $D7_log"
+    _add D7 false "${D7_fails}/${D7_total} op-read event(s) failed in last ${D7_window_h}h, bootstrap did not recover (${D7_ms}ms cumulative wall-time cost); see $D7_log"
   fi
 else
   _add D7 true "no op-read-failures.jsonl (clean steady state)"
