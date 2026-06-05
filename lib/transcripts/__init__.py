@@ -11,6 +11,14 @@ to the module and may change without notice.
 
 from __future__ import annotations
 
+from transcripts.jsonl import (
+    AUTO_NOTIFICATION_RES,
+    SYSTEM_REMINDER_RE,
+    classify,
+    is_auto_notification_user_entry,
+    read_entries,
+    strip_auto_notifications,
+)
 from transcripts.provenance import (
     AUTHORITATIVE_URL_SOURCES,
     RECONCILE_ELIGIBLE_URL_SOURCES,
@@ -35,18 +43,24 @@ from transcripts.schema import (
 
 __all__ = [
     "AUTHORITATIVE_URL_SOURCES",
+    "AUTO_NOTIFICATION_RES",
     "PARSER_VERSION",
     "RECONCILE_ELIGIBLE_URL_SOURCES",
+    "SYSTEM_REMINDER_RE",
     "VALID_URL_SOURCES",
     "R2Coordinates",
     "R2Error",
     "Sidecar",
     "UrlSource",
+    "classify",
     "dominant_scan_source",
     "is_authoritative",
+    "is_auto_notification_user_entry",
     "list_keys",
     "r2_client",
     "r2_coordinates",
+    "read_entries",
     "read_sidecar",
+    "strip_auto_notifications",
     "write_sidecar",
 ]
