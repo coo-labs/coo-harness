@@ -72,6 +72,12 @@ ensure_gh_symlink_on_path
 # auto-carries the Claude Code session URL. MEMO 2026-04-26-02
 # (issue #150). Idempotent via marker grep.
 ensure_gh_coo_wrap "$SCRIPT_DIR/../gh-coo-wrap.sh"
+# Path-shadow op with op-coo-wrap so every `op` consumer gets
+# transparent rate-limit fallback between OP_SERVICE_ACCOUNT_TOKEN
+# and OP_SERVICE_ACCOUNT_TOKEN_BACKUP. Installs before
+# coo-bootstrap.sh runs (next in the SessionStart hook chain), so
+# bootstrap's own op-reads go through the shim from the start.
+ensure_op_coo_wrap "$SCRIPT_DIR/../op-coo-wrap.sh"
 # Refresh the external-touch (F6) cache when it's older than 24h.
 # Build-time prewarm in cloud-setup.sh handles the fresh-snapshot case;
 # this catches snapshots resumed after the cache has gone stale and
