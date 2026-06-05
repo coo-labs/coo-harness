@@ -92,6 +92,36 @@ clean_input='https://github.com/coo-labs/coo-harness.git'
 clean_out="$(printf '%s' "$clean_input" | sed -E "$PAT_REDACT_SED")"
 assert_eq "redaction leaves clean URLs alone" "$clean_input" "$clean_out"
 
+echo "== resolve_fallback_pat (coo-harness#457) =="
+
+# env var present -> returns it verbatim; op is never consulted.
+out="$(GITHUB_MCP_PAT=env_pat_111 resolve_fallback_pat GITHUB_MCP_PAT op://COO/github-pat-vade-coo/token)"
+assert_eq "env present -> env value" "env_pat_111" "$out"
+
+# env var absent -> resolves from the op:// path via a mock op on PATH.
+OPDIR="$(mktemp -d)"
+cat > "$OPDIR/op" <<'OPEOF'
+#!/usr/bin/env bash
+[ "$1" = "read" ] || exit 1
+case "$2" in
+  op://COO/github-pat-vade-coo/token)            printf 'op_pat_mcp_222' ;;
+  op://COO/github-pat-classic-public/credential) printf 'op_pat_pub_333' ;;
+  *) exit 1 ;;
+esac
+OPEOF
+chmod +x "$OPDIR/op"
+
+out="$(unset GITHUB_MCP_PAT; PATH="$OPDIR:$PATH" resolve_fallback_pat GITHUB_MCP_PAT op://COO/github-pat-vade-coo/token)"
+assert_eq "env absent + mock op -> MCP op value" "op_pat_mcp_222" "$out"
+
+out="$(unset GITHUB_PUBLIC_PAT; PATH="$OPDIR:$PATH" resolve_fallback_pat GITHUB_PUBLIC_PAT op://COO/github-pat-classic-public/credential)"
+assert_eq "env absent + mock op -> public op value" "op_pat_pub_333" "$out"
+
+# env absent + op-read miss (unknown ref) -> empty (drives the hard-fail).
+out="$(unset GITHUB_MCP_PAT; PATH="$OPDIR:$PATH" resolve_fallback_pat GITHUB_MCP_PAT op://COO/nonexistent/token)"
+assert_eq "env absent + op miss -> empty" "" "$out"
+rm -rf "$OPDIR"
+
 echo "== end-to-end: -u flag does not leak PAT into .git/config =="
 
 # Stage a scratch repo whose `origin` remote points at a non-github proxy

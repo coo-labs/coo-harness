@@ -134,6 +134,9 @@ jobs:
       - name: Auto-subscribe PR hook — matcher contract (wrapper + raw)
         run: bash "$GITHUB_WORKSPACE/scripts/ci/test-auto-subscribe-pr.sh"
 
+      - name: Git push fallback — op:// PAT resolution + leak hardening (coo-harness#457, #124)
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/test-git-push-fallback.sh"
+
       - name: Boot brake — guard + clear hook contract (coo-memory#1082 v2 §7)
         env:
           VADE_COO_MEMORY_DIR: ${{ github.workspace }}/coo-memory
