@@ -80,10 +80,14 @@ invokes `scripts/coo-bootstrap.sh`, which:
    creds from the 1Password `COO` vault
 4. Writes `~/.ssh/vade-coo-{auth,sign}`, `~/.ssh/allowed_signers`,
    `~/.gitconfig` with COO identity + signed-commit config
-5. Writes `~/.vade/coo-env` (sourceable) and merges vars into
-   `~/.claude/settings.json` so `.mcp.json` `${GITHUB_MCP_PAT}`,
-   `${AGENTMAIL_API_KEY}`, `${MEM0_API_KEY}`,
-   `${OP_SERVICE_ACCOUNT_TOKEN}` substitutions resolve
+5. Exports the credentials into the bootstrap process env (Phase 2;
+   coo-memory#873). Secrets are NOT persisted to `~/.vade/coo-env`
+   (retired) or `~/.claude/settings.json::env` (scrubbed). MCP children
+   receive secrets via `op run --env-file=/dev/shm/coo-mcp-env/*.env`;
+   gh-coo-wrap caches PAT values in tmpfs (`$XDG_RUNTIME_DIR/coo-gh-pat-cache/`)
+   with a 5-minute TTL. Wrapper scripts that need a secret at call
+   time use an inline `op read` resolver (pattern in
+   `scripts/lifecycle/session-end-transcript-export.sh`)
 6. Validates the PAT is actually for `vade-coo` — aborts loudly on
    mismatch
 

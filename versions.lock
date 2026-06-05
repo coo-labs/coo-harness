@@ -121,6 +121,28 @@ boto3               >=1.34,<2 # AWS SDK for Python. Used by
                               # silently break the script via API
                               # change. uv resolves on first run; cache
                               # warm afterward.
+PyYAML              >=6.0     # YAML loader. Used by
+                              # coo-memory/bin/secrets-schema-check.py
+                              # (S1 invariant validator, run via
+                              # `uv run --script` per its PEP 723
+                              # metadata) and by the inline python3
+                              # heredoc in
+                              # scripts/lib/integrity-group-s.sh's S8
+                              # env-drift classifier. >=6.0 for the
+                              # unified safe_load API.
+jsonschema          >=4.0     # JSON Schema validator (Draft 2020-12).
+                              # Used by
+                              # coo-memory/bin/secrets-schema-check.py
+                              # to validate operations/secrets/schema.yaml
+                              # against operations/secrets/schema.schema.json
+                              # (S1 invariant). Without this the S1
+                              # check silently skipped and schema drift
+                              # surfaced only at CI time; integrity-
+                              # group-s.sh:S1 now switches to `uv run
+                              # --script` so the PEP 723 metadata
+                              # resolves both deps transparently.
+                              # Documented gap closed by 2026-06-05
+                              # epic close-out.
 
 # Deferred (not in image yet, listed so the absence is explicit):
 # rust       — planned for Phase 3+ performance modules per vade-core

@@ -104,7 +104,13 @@ _resolve_pat() {
         printf '%s' "$GITHUB_PUBLIC_PAT"
         return 0
       fi
-      op_path="op://COO/GITHUB_PUBLIC_PAT/token"
+      # Field is `credential` (confirmed 2026-06-05 via `op item get
+      # GITHUB_PUBLIC_PAT`). The audit-era `/token` path silently returned
+      # empty since the schema renamed the field; cross-org gh writes
+      # surfaced the bug for the first time mid-session. The new S9
+      # invariant in integrity-group-s.sh cross-checks hardcoded op-paths
+      # like this against schema.yaml::credentials[] to prevent re-regression.
+      op_path="op://COO/GITHUB_PUBLIC_PAT/credential"
       ;;
     *) return 0 ;;
   esac

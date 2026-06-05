@@ -52,7 +52,8 @@ Acceptable for a Stop hook (operator perceives session-end as already
 "the slow part"); flagged here so an operator who notices the pause
 on first session knows it's expected, not stuck.
 
-Required env (sourced from ~/.vade/coo-env by the bash wrapper):
+Required env (exported by the bash wrapper's inline op-read resolver;
+Phase 2 — `~/.vade/coo-env` retired per coo-memory#873):
   R2_TRANSCRIPTS_ACCESS_KEY_ID      — R2 API token access key (32 hex)
   R2_TRANSCRIPTS_SECRET_ACCESS_KEY  — R2 API token secret key (64 hex)
 Read at run time via `op read` (no env exposure):
