@@ -891,18 +891,24 @@ s_check_S9() {
   fi
 
   # Build the allowed-set: every credentials[].op_item × (op_field ∪
-  # op_alt_fields[]) pair. Emit one `<item>|<field>` line per pair.
-  # Filters out the placeholder op_items that contain `(` (e.g.
-  # "(env-only — ...)", "(none — minted from ...)") since those are
-  # not real 1P items and no script should op-read them anyway.
+  # op_alt_fields[]) pair, emitted as `<item>|<field>` lines. Filters
+  # out placeholder op_items containing `(` (e.g. "(env-only — ...)",
+  # "(none — minted from ...)") — not real 1P items, never op-read.
+  #
+  # Two passes (op_field, then op_alt_fields) rather than one
+  # comma-union expression: mikefarah yq drops the iterated second
+  # branch of a `A, (B[] | C)` union (verified v4.44.3) while python-yq
+  # keeps it, so the union form silently lost every op_alt_field under
+  # the Go yq — a false-positive on the SSH "public key" paths in any
+  # environment running mikefarah (CI, notably). The two-pass form is
+  # byte-identical across both implementations.
   local allowed
-  allowed="$(yq -r '
-    .credentials[]
-    | select(.op_item | test("^[^(]") )
-    | . as $c
-    | ($c.op_item + "|" + $c.op_field),
-      ( ($c.op_alt_fields // [])[] | ($c.op_item + "|" + .) )
-  ' "$schema" 2>/dev/null | sort -u)" || allowed=""
+  allowed="$(
+    {
+      yq -r '.credentials[] | select(.op_item | test("^[^(]")) | .op_item + "|" + .op_field' "$schema" 2>/dev/null
+      yq -r '.credentials[] | select(.op_item | test("^[^(]")) | .op_item as $i | .op_alt_fields[]? | $i + "|" + .' "$schema" 2>/dev/null
+    } | sort -u
+  )" || allowed=""
 
   if [ -z "$allowed" ]; then
     _add S9 skip "schema produced no op-paths to cross-check (parse failure?)"
