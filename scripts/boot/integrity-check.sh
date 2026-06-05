@@ -975,6 +975,14 @@ F1_ALLOWLIST_SHA=(
   # the live-read backfill of expires_at + permission_scopes on the canonical
   # PAT. Clear linkage to #871 Track 1 §4; F1 regex miss only.
   "21fa1f661b"
+  # aa645c5315 — "schema.schema.json: extend enums for cf-worker surface + retired status"
+  # by Coo on 2026-06-05. Body opens with "CI caught 5 enum violations
+  # introduced by the close-out commit" — the lineage is to the prior
+  # main commit (the secrets-epic close-out, MEMO-2026-06-05-v5qk /
+  # coo-memory#871). The "the close-out commit" referent is unambiguous
+  # in body context but the F1 regex matches neither MEMO-... nor #N
+  # forms. Clear linkage to #871 Track close-out; F1 regex miss only.
+  "aa645c5315"
 )
 if [ -d "$F_REPO/.git" ] && check_cmd git; then
   f1_total=0
