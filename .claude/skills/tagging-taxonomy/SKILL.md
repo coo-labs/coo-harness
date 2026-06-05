@@ -40,6 +40,35 @@ Don't invoke for: PR-level review labels (none defined), project-board
 see `operations/project-board.md`), or commit-message conventions
 (handled elsewhere).
 
+## Filing new issues — use `gh-issue-create.sh`
+
+The canonical agent-path wrapper for filing new issues is
+[`coo-harness/scripts/gh-issue-create.sh`](https://github.com/coo-labs/coo-harness/blob/main/scripts/gh-issue-create.sh).
+Mirrors `gh-pr-create.sh`: pre-submission lint (type, milestone,
+template-section structure, label hygiene) + post-create native-type
+set + REST field-values POST + `addSubIssue` for `--parent-issue` /
+`--children`. Use this skill to **decide** which dimension values to
+pass into the wrapper:
+
+```bash
+coo-harness/scripts/gh-issue-create.sh \
+  --repo coo-labs/<repo> \
+  --type <Task|Bug|Feature|Epic|Chore|Docs|Refactor|Test|Research|Skill> \
+  --milestone "<canonical theme>" \
+  --priority <P0|P1|P2|P3> \
+  --readiness <Ready|"Needs design"|"Needs research"|"Needs breakdown"> \
+  --label "area:<value>" \
+  --label "<qualifier>" \
+  --title "..." \
+  --body-file <path>
+```
+
+The wrapper refuses deprecated `type:*` / `prio:*` / `readiness:*`
+labels — they shouldn't appear in body or `--label` calls anyway,
+since the native fields supersede them. See
+[`coo-memory/operations/issue-fields-and-types.md`](https://github.com/coo-labs/coo-memory/blob/main/operations/issue-fields-and-types.md)
+§"Agent path" for the full flag list and exit codes.
+
 ## The dimensions
 
 ### 1. Native issue type — kind of work (exactly one)
