@@ -20,8 +20,10 @@
 #   6. Re-source the env block persisted to $TMP_HOME/.claude/settings.json
 #      (mirroring Claude Code's resume-time injection — tokens etc.),
 #      then run scripts/boot/session-start-sync.sh + integrity-check.sh
-#      explicitly (in live sessions integrity-check.sh runs inside
-#      coo-identity-digest; CI only runs session-start-sync directly).
+#      explicitly (in live sessions integrity-check.sh runs from
+#      coo-bootstrap.sh's EXIT trap; the CI driver re-runs it here so the
+#      JSON reflects the post-session-start-sync mutations the staged
+#      cloud-setup didn't apply).
 #   7. Read integrity-check.json, subtract VADE_CI_ALLOWLIST, fail if any
 #      degraded invariants remain.
 #   8. Render a markdown summary (groups + per-invariant table) to
