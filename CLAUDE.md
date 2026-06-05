@@ -75,7 +75,7 @@ ritual.
 
 What runs:
 1. `scripts/ci/run-bootstrap-regression.sh` stages
-   `$VADE_CI_WORKSPACE_ROOT/{vade-runtime,vade-coo-memory}` from the
+   `$VADE_CI_WORKSPACE_ROOT/{coo-harness,coo-memory}` from the
    PR checkout (sibling repos are stubbed).
 2. Generates fixture ed25519 keys per run; their fingerprints are
    exported as `COO_AUTH_FP_EXPECTED` / `COO_SIGN_FP_EXPECTED` so
@@ -92,7 +92,7 @@ What runs:
 
 Allowlist defaults to empty. E1–E4 (live MCP probes) skip in CI by
 design; F1–F4 (culture-substrate invariants) skip cleanly because
-the staged `vade-coo-memory` is a stub without `.git`. Bump the
+the staged `coo-memory` is a stub without `.git`. Bump the
 allowlist via the workflow's `VADE_CI_ALLOWLIST` env or the
 `workflow_dispatch` input — cite the reason in the commit so the
 next operator can audit.

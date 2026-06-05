@@ -71,7 +71,7 @@ assert_block "Read memo_index.json (relative path)" \
   "$(run_hook_read coo-memory/memos/memo_index.json)"
 
 assert_block "Read memo_index.json (sibling-checkout path)" \
-  "$(run_hook_read /workspace/vade-coo-memory/memos/memo_index.json)"
+  "$(run_hook_read /workspace/coo-memory/memos/memo_index.json)"
 
 assert_block "Read identity_layer.md (absolute canonical path)" \
   "$(run_hook_read /home/user/coo-memory/identity/identity_layer.md)"
