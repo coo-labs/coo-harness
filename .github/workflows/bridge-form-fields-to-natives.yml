@@ -10,7 +10,7 @@ name: Bridge issue-form widgets to native fields (reusable)
 # in coo-memory / coo-harness / vade-canvas / coo-logs.
 #
 # Canonical design: coo-labs/coo-memory#811 + MEMO-2026-05-21-xfqh.
-# Pinning matrix + field IDs: coo/operations/issue-fields-and-types.md.
+# Pinning matrix + field IDs: coo-memory/.claude/skills/filing-issues/references/issue-fields-and-types.md.
 #
 # Fires only on `issues.opened` (one-shot bridging at creation time).
 # Body-edits do not re-trigger — users update native fields via the
