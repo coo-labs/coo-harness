@@ -10,7 +10,7 @@ name: Auto-tag new issues (reusable)
 # resolution fails despite access_level=organization; bridge-form-fields-to-natives.yml
 # is the live in-org precedent for "public canonical, mixed consumers").
 # Operations doc: coo-labs/coo-memory/coo/operations/workflow-centralization.md
-# Canonical taxonomy: https://github.com/coo-labs/coo-memory/blob/main/coo/operations/issue-fields-and-types.md
+# Canonical taxonomy: https://github.com/coo-labs/coo-memory/blob/main/.claude/skills/filing-issues/references/issue-fields-and-types.md
 # Canonical project:  https://github.com/orgs/coo-labs/projects/1 (VADE)
 #   Project node ID:  PVT_kwDOEGdN_84BUV2r
 #
@@ -194,7 +194,7 @@ jobs:
             is out of scope for this workflow.
 
             2. Classify across the dimensions below. Canonical ref:
-               https://github.com/coo-labs/coo-memory/blob/main/coo/operations/issue-fields-and-types.md
+               https://github.com/coo-labs/coo-memory/blob/main/.claude/skills/filing-issues/references/issue-fields-and-types.md
 
                Issue type is set by the issue template's `type:`
                front-matter; Priority / Readiness / Effort field values
