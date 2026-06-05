@@ -66,15 +66,12 @@ cloud-style workspace under `/home/user`, runs `scripts/boot/cloud-setup.sh`
 `scripts/ci/mocks/`), then asserts the integrity-check report has no
 degraded invariants modulo the `VADE_CI_ALLOWLIST` env. Catches
 script-level regressions at PR-open time without burning a Claude
-Code session per check. Tracked at
-[coo-harness#86](https://github.com/coo-labs/coo-harness/issues/86).
+Code session per check.
 
-Layer-2 (SDK-driven harness load test) is sibling work at
-[coo-harness#85](https://github.com/coo-labs/coo-harness/issues/85).
 This Layer-1 suite does not exercise Claude Code reading
 `settings.json`, MCP startup, skill loading, or live 1Password /
 GitHub PAT round-trips — those stay in the manual fresh-container
-ritual until #85 closes.
+ritual.
 
 What runs:
 1. `scripts/ci/run-bootstrap-regression.sh` stages
