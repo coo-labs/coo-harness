@@ -137,6 +137,9 @@ jobs:
       - name: op-read retry recovery — install_coo_ssh_keys path (coo-harness#451)
         run: bash "$GITHUB_WORKSPACE/scripts/ci/test-op-retry-recovery.sh"
 
+      - name: install_coo_ssh_keys idempotent skip (coo-harness#473)
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/test-install-coo-ssh-keys-idempotent.sh"
+
       - name: Git push fallback — op:// PAT resolution + leak hardening (coo-harness#457, #124)
         run: bash "$GITHUB_WORKSPACE/scripts/ci/test-git-push-fallback.sh"
 

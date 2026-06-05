@@ -2048,37 +2048,12 @@ _fingerprint_of() {
   ssh-keygen -lf "$pub" 2>/dev/null | awk '{print $2}' || true
 }
 
-# Install COO SSH keys from 1Password into ~/.ssh/. Validates
-# fingerprints against expected values when ssh-keygen is available;
-# logs a warning and continues when it is not (see ensure_openssh_client).
-install_coo_ssh_keys() {
-  local ssh_dir="${HOME}/.ssh"
-  mkdir -p "$ssh_dir"
-  chmod 700 "$ssh_dir"
-  log "Installing COO SSH keys into $ssh_dir"
-
-  _op_to_file "op://COO/vade-coo-ssh-auth/private key" "$ssh_dir/vade-coo-auth"     0600 || return 1
-  _op_to_file "op://COO/vade-coo-ssh-auth/public key"  "$ssh_dir/vade-coo-auth.pub" 0644 || return 1
-  _op_to_file "op://COO/vade-coo-ssh-sign/private key" "$ssh_dir/vade-coo-sign"     0600 || return 1
-  _op_to_file "op://COO/vade-coo-ssh-sign/public key"  "$ssh_dir/vade-coo-sign.pub" 0644 || return 1
-
-  if ensure_openssh_client; then
-    local fp_auth fp_sign
-    fp_auth="$(_fingerprint_of "$ssh_dir/vade-coo-auth.pub")"
-    fp_sign="$(_fingerprint_of "$ssh_dir/vade-coo-sign.pub")"
-    if [ "$fp_auth" != "$COO_AUTH_FP_EXPECTED" ]; then
-      log "FATAL: auth key fingerprint mismatch (got '${fp_auth:-empty}', expected $COO_AUTH_FP_EXPECTED)"
-      return 1
-    fi
-    if [ "$fp_sign" != "$COO_SIGN_FP_EXPECTED" ]; then
-      log "FATAL: signing key fingerprint mismatch (got '${fp_sign:-empty}', expected $COO_SIGN_FP_EXPECTED)"
-      return 1
-    fi
-    log "SSH key fingerprints validated"
-  else
-    log "WARNING: skipping SSH key fingerprint validation (ssh-keygen unavailable)"
-  fi
-
+# Refresh allowed_signers + known_hosts from current ~/.ssh state.
+# Idempotent — writes the same bytes given the same pubkeys, so both
+# the op-read and the disk-skip paths in install_coo_ssh_keys reach
+# identical disk state by calling it (coo-harness#473).
+_install_coo_ssh_keys_derived_state() {
+  local ssh_dir="$1"
   local allowed="$ssh_dir/allowed_signers"
   {
     echo "coo@vade-app.dev $(cat "$ssh_dir/vade-coo-auth.pub")"
@@ -2101,6 +2076,64 @@ install_coo_ssh_keys() {
       log "WARNING: ssh-keyscan github.com returned nothing (port 22 blocked?); SSH git ops will fail in this environment"
     fi
   fi
+}
+
+# Install COO SSH keys from 1Password into ~/.ssh/. Validates
+# fingerprints against expected values when ssh-keygen is available;
+# logs a warning and continues when it is not (see ensure_openssh_client).
+#
+# Skip-when-clean: if the four key files are already on disk with
+# fingerprints matching the expected values, the four op-reads below
+# would just rewrite the same bytes — skip them entirely. coo-harness#473.
+# Saves ~1.6 s of wall time + 4 quota units per marker-stale re-bootstrap.
+# Falls through on missing files, missing ssh-keygen (no way to validate),
+# or fingerprint mismatch (refetch overwrites stale or rotated content).
+install_coo_ssh_keys() {
+  local ssh_dir="${HOME}/.ssh"
+  mkdir -p "$ssh_dir"
+  chmod 700 "$ssh_dir"
+
+  if [ -f "$ssh_dir/vade-coo-auth" ] \
+     && [ -f "$ssh_dir/vade-coo-auth.pub" ] \
+     && [ -f "$ssh_dir/vade-coo-sign" ] \
+     && [ -f "$ssh_dir/vade-coo-sign.pub" ] \
+     && ensure_openssh_client; then
+    local _disk_fp_auth _disk_fp_sign
+    _disk_fp_auth="$(_fingerprint_of "$ssh_dir/vade-coo-auth.pub")"
+    _disk_fp_sign="$(_fingerprint_of "$ssh_dir/vade-coo-sign.pub")"
+    if [ "$_disk_fp_auth" = "$COO_AUTH_FP_EXPECTED" ] \
+       && [ "$_disk_fp_sign" = "$COO_SIGN_FP_EXPECTED" ]; then
+      log "COO SSH keys already installed at $ssh_dir (fingerprints match); skipping op-read"
+      _install_coo_ssh_keys_derived_state "$ssh_dir"
+      return 0
+    fi
+    log "COO SSH keys on disk but fingerprint mismatch (auth=${_disk_fp_auth:-empty} sign=${_disk_fp_sign:-empty}); refetching"
+  fi
+
+  log "Installing COO SSH keys into $ssh_dir"
+  _op_to_file "op://COO/vade-coo-ssh-auth/private key" "$ssh_dir/vade-coo-auth"     0600 || return 1
+  _op_to_file "op://COO/vade-coo-ssh-auth/public key"  "$ssh_dir/vade-coo-auth.pub" 0644 || return 1
+  _op_to_file "op://COO/vade-coo-ssh-sign/private key" "$ssh_dir/vade-coo-sign"     0600 || return 1
+  _op_to_file "op://COO/vade-coo-ssh-sign/public key"  "$ssh_dir/vade-coo-sign.pub" 0644 || return 1
+
+  if ensure_openssh_client; then
+    local fp_auth fp_sign
+    fp_auth="$(_fingerprint_of "$ssh_dir/vade-coo-auth.pub")"
+    fp_sign="$(_fingerprint_of "$ssh_dir/vade-coo-sign.pub")"
+    if [ "$fp_auth" != "$COO_AUTH_FP_EXPECTED" ]; then
+      log "FATAL: auth key fingerprint mismatch (got '${fp_auth:-empty}', expected $COO_AUTH_FP_EXPECTED)"
+      return 1
+    fi
+    if [ "$fp_sign" != "$COO_SIGN_FP_EXPECTED" ]; then
+      log "FATAL: signing key fingerprint mismatch (got '${fp_sign:-empty}', expected $COO_SIGN_FP_EXPECTED)"
+      return 1
+    fi
+    log "SSH key fingerprints validated"
+  else
+    log "WARNING: skipping SSH key fingerprint validation (ssh-keygen unavailable)"
+  fi
+
+  _install_coo_ssh_keys_derived_state "$ssh_dir"
 }
 
 # Record a per-call op-read observability event to
