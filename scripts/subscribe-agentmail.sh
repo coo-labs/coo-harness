@@ -20,11 +20,14 @@
 # outbound `sent` from the same inbox; webhook noise (drafts, etc.)
 # is excluded by the same filter.
 #
-# Authentication: AGENTMAIL_API_KEY required in env.
+# Authentication: AGENTMAIL_API_KEY if set; otherwise falls back to
+# `op read op://COO/agentmail-api-vade-coo/credential` (the canonical key
+# path), so Monitor-tool subshells — which post-Phase-2 (coo-memory#873)
+# don't inherit the key in their env — still authenticate.
 #
 # Exit codes:
 #   0  graceful shutdown (SIGINT/SIGTERM)
-#   1  missing AGENTMAIL_API_KEY
+#   1  no AgentMail key (env unset and op-read fallback failed)
 #   2  argument error
 
 set -eu
@@ -41,7 +44,8 @@ Arguments:
   [poll_seconds]   Polling interval, default 60
 
 Environment:
-  AGENTMAIL_API_KEY     AgentMail API key (required)
+  AGENTMAIL_API_KEY     AgentMail API key (preferred)
+  (unset)               Falls back to op read op://COO/agentmail-api-vade-coo/credential
   VADE_CLOUD_STATE_DIR  State directory root (defaults to ~/.vade-cloud-state)
 
 Examples:
@@ -69,8 +73,14 @@ if ! [[ "$poll" =~ ^[0-9]+$ ]]; then
   exit 2
 fi
 
+if [ -z "${AGENTMAIL_API_KEY:-}" ] && command -v op >/dev/null 2>&1; then
+  # Post-Phase-2 (coo-memory#873) the key is not in tool-subshell env;
+  # the MCP env materializer resolves it from 1Password, but this Monitor
+  # script reads the env directly. Single-shot op-read fallback, no retry.
+  AGENTMAIL_API_KEY="$(op read op://COO/agentmail-api-vade-coo/credential 2>/dev/null || true)"
+fi
 if [ -z "${AGENTMAIL_API_KEY:-}" ]; then
-  echo "error: AGENTMAIL_API_KEY must be set" >&2
+  echo "error: no AgentMail key — AGENTMAIL_API_KEY unset and op read op://COO/agentmail-api-vade-coo/credential failed" >&2
   exit 1
 fi
 

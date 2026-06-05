@@ -35,11 +35,14 @@
 # (not the org). GITHUB_MCP_PAT — the org-scoped fine-grained PAT used for
 # attributable writes — only exposes Repository + Organization permissions
 # and returns 403 on /notifications. GH_TOKEN is the final fallback for
-# non-COO contexts. Script detects 403 and exits with a FATAL message.
+# non-COO contexts. When none of these is in the env (e.g. a Monitor-tool
+# subshell post-Phase-2, coo-memory#873), the script falls back to
+# `op read op://COO/github-pat-classic-public/credential` — the classic
+# PAT's canonical path. Script detects 403 and exits with a FATAL message.
 #
 # Exit codes:
 #   0  graceful shutdown (SIGINT/SIGTERM)
-#   1  missing GitHub token  OR  token lacks notifications scope
+#   1  no GitHub token (env unset and op-read fallback failed)  OR  token lacks notifications scope
 #   2  argument error
 
 set -eu
@@ -60,6 +63,7 @@ Environment:
                         endpoint is a user-level API and GITHUB_MCP_PAT
                         lacks the scope; see header comment)
   GH_TOKEN              Final fallback for non-COO contexts
+  (none set)            Falls back to op read op://COO/github-pat-classic-public/credential
   VADE_CLOUD_STATE_DIR  State directory root (defaults to ~/.vade-cloud-state)
 
 Examples:
@@ -78,8 +82,14 @@ if ! [[ "$poll" =~ ^[0-9]+$ ]]; then
 fi
 
 token="${GITHUB_PUBLIC_PAT:-${GH_TOKEN:-}}"
+if [ -z "$token" ] && command -v op >/dev/null 2>&1; then
+  # Post-Phase-2 (coo-memory#873) the PAT is not in tool-subshell env;
+  # this endpoint needs the classic public-repo PAT (see header), so fall
+  # back to its canonical 1Password path. Single-shot, no retry.
+  token="$(op read op://COO/github-pat-classic-public/credential 2>/dev/null || true)"
+fi
 if [ -z "$token" ]; then
-  echo "error: GITHUB_PUBLIC_PAT or GH_TOKEN must be set" >&2
+  echo "error: no GitHub token — GITHUB_PUBLIC_PAT/GH_TOKEN unset and op read op://COO/github-pat-classic-public/credential failed" >&2
   exit 1
 fi
 

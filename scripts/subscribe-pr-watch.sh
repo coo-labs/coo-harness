@@ -44,11 +44,14 @@
 # while it recomputes after a push. Transitions through UNKNOWN are not
 # emitted; only transitions between concrete states fire events.
 #
-# Authentication: relies on GITHUB_MCP_PAT or GH_TOKEN being set.
+# Authentication: GITHUB_MCP_PAT or GH_TOKEN if set; otherwise falls back
+# to `op read op://COO/github-pat-vade-coo/token` (the canonical PAT path
+# used by gh-coo-wrap.sh). The fallback covers Monitor-tool subshells,
+# which post-Phase-2 (coo-memory#873) don't inherit the PAT in their env.
 #
 # Exit codes:
 #   0  graceful shutdown (SIGINT/SIGTERM) or terminal state (MERGED/CLOSED)
-#   1  missing GitHub token
+#   1  no GitHub token (env unset and op-read fallback failed)
 #   2  argument error
 
 set -eu
@@ -74,6 +77,7 @@ Arguments:
 Environment:
   GITHUB_MCP_PAT        GitHub PAT (preferred)
   GH_TOKEN              Fallback if MCP PAT unset
+  (neither set)         Falls back to op read op://COO/github-pat-vade-coo/token
   VADE_CLOUD_STATE_DIR  State directory root (defaults to ~/.vade-cloud-state)
 
 Examples:
@@ -110,8 +114,16 @@ owner="${repo%%/*}"
 name="${repo##*/}"
 
 token="${GITHUB_MCP_PAT:-${GH_TOKEN:-}}"
+if [ -z "$token" ] && command -v op >/dev/null 2>&1; then
+  # Post-Phase-2 (coo-memory#873) the PAT is not in tool-subshell env;
+  # gh-coo-wrap.sh resolves it from 1Password at call time, but this
+  # script's env-check runs before any wrapped `gh` call, so Monitor-tool
+  # invocations see no PAT. Single-shot op-read fallback (no retry — the
+  # poll loop's gh calls have their own per-call failure handling).
+  token="$(op read op://COO/github-pat-vade-coo/token 2>/dev/null || true)"
+fi
 if [ -z "$token" ]; then
-  echo "error: GITHUB_MCP_PAT or GH_TOKEN must be set" >&2
+  echo "error: no GitHub token — GITHUB_MCP_PAT/GH_TOKEN unset and op read op://COO/github-pat-vade-coo/token failed" >&2
   exit 1
 fi
 
