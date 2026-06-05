@@ -158,6 +158,34 @@ out="$(printf 'from stdin' | "$WRAPPER" pr create --title t --body-file -)"
 assert_contains "--body-file=stdin augments" "$out" "$EXPECTED_URL"
 assert_contains "--body-file=stdin preserves" "$out" "from stdin"
 
+# ---- TEST 14a: multi-line --body materializes to --body-file (coo-memory#1052) ----
+# Multi-line --body values lose backslash + escape literal characters through
+# `gh`'s argv-to-JSON path on some transport edges (heredoc-mangling shape).
+# The wrap re-emits multi-line bodies as --body-file <tmp> so the body is
+# byte-exact downstream.
+multiline_body=$'first line\nsecond line with \\backslash\nthird line'
+out="$("$WRAPPER" pr create --title t --body "$multiline_body")"
+assert_contains "multi-line --body emits --body-file ARG" "$out" "ARG[5]=--body-file"
+assert_contains "multi-line --body content: line 1 preserved" "$out" "first line"
+assert_contains "multi-line --body content: literal backslash preserved" "$out" "\\backslash"
+assert_contains "multi-line --body content: line 3 preserved" "$out" "third line"
+assert_contains "multi-line --body content augmented" "$out" "$EXPECTED_URL"
+
+# ---- TEST 14b: single-line --body stays inline when not augmented ----
+# The augment function returns the body unchanged when it already carries
+# a session URL (idempotency path). A single-line idempotent body should
+# stay inline as --body <text>, not be lifted into --body-file.
+out="$("$WRAPPER" pr create --title t --body "already has $EXPECTED_URL inline")"
+assert_contains "single-line idempotent --body keeps --body ARG" "$out" "ARG[5]=--body"
+assert_not_contains "single-line idempotent --body does NOT emit --body-file" "$out" "ARG[5]=--body-file"
+
+# ---- TEST 14c: multi-line --body= form also materializes ----
+out="$("$WRAPPER" pr create --title t --body="alpha
+beta")"
+assert_contains "multi-line --body= emits --body-file" "$out" "ARG[5]=--body-file"
+assert_contains "multi-line --body= content preserved" "$out" "alpha"
+assert_contains "multi-line --body= content preserved (line 2)" "$out" "beta"
+
 # ---- TEST 15: outside-Claude (no session env) — pass-through ----
 out="$(env -u CLAUDE_CODE_REMOTE_SESSION_ID -u CLAUDE_CODE_SESSION_ID \
        COO_GH_REAL="$WORK/gh-real" "$WRAPPER" pr create --title t --body "hi")"

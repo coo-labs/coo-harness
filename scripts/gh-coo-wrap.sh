@@ -638,28 +638,50 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Append a body value to new_args as either inline --body <text> (single
+# line) or staged --body-file <tmp> (multi-line). Multi-line --body inputs
+# travel through `gh`'s argv → HTTP-JSON path and lose literal backslashes
+# / newline escapes on some transport edges (the heredoc-mangling shape
+# of coo-memory#1052). Staging to a file makes the body byte-exact.
+# Temp file lifetime is bound to the cleanup trap above.
+emit_body_value() {
+  local val="$1"
+  case "$val" in
+    *$'\n'*)
+      local tmp
+      tmp="$(mktemp)"
+      tmp_files+=("$tmp")
+      printf '%s' "$val" > "$tmp"
+      new_args+=("--body-file" "$tmp")
+      ;;
+    *)
+      new_args+=("--body" "$val")
+      ;;
+  esac
+}
+
 while [ $# -gt 0 ]; do
   a="$1"
   case "$a" in
     --body|-b)
       shift
       body="${1:-}"
-      new_args+=("$a" "$(augment "$body")")
+      emit_body_value "$(augment "$body")"
       ;;
     --body=*)
       body="${a#--body=}"
-      new_args+=("--body=$(augment "$body")")
+      emit_body_value "$(augment "$body")"
       ;;
     -b=*)
       body="${a#-b=}"
-      new_args+=("-b=$(augment "$body")")
+      emit_body_value "$(augment "$body")"
       ;;
     --body-file)
       shift
       bf="${1:-}"
       if [ "$bf" = "-" ]; then
         body="$(cat)"
-        new_args+=("--body" "$(augment "$body")")
+        emit_body_value "$(augment "$body")"
       elif [ -f "$bf" ]; then
         body="$(cat "$bf")"
         tmp="$(mktemp)"
@@ -674,7 +696,7 @@ while [ $# -gt 0 ]; do
       bf="${a#--body-file=}"
       if [ "$bf" = "-" ]; then
         body="$(cat)"
-        new_args+=("--body" "$(augment "$body")")
+        emit_body_value "$(augment "$body")"
       elif [ -f "$bf" ]; then
         body="$(cat "$bf")"
         tmp="$(mktemp)"
