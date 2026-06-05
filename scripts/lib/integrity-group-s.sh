@@ -856,6 +856,15 @@ PY
 # for fixture purposes). False-positives on these would make S9
 # noisy without catching real bugs.
 s_check_S9() {
+  # In CI fake-env mode the staged coo-memory is a stub (minimal schema
+  # without renames or alt-field declarations); cross-checking the real
+  # scripts/* corpus against it would false-positive. Same skip-pattern
+  # as S4/S7 (which gate via _s_op_live). The live-env run still
+  # exercises S9 fully.
+  if _s_in_ci_fake_env; then
+    _add S9 skip "skipped: CI fake-env stub coo-memory lacks the full schema; live-env probe only"
+    return
+  fi
   local schema; schema="$(_s_schema_yaml)"
   if [ ! -f "$schema" ]; then
     _add S9 skip "schema.yaml not found at $schema"
