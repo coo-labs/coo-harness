@@ -79,10 +79,38 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
+      - name: Load active repo slugs from canonical registry
+        id: registry
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Read coo-labs/.github/repos.yaml; emit active non-meta repo
+          # slugs (bare, no coo-labs/ prefix) as a JSON array for the
+          # github-script steps to consume. `.github` is public so the
+          # default github.token can read it. Failure here fails the job
+          # loudly (set -e) rather than silently falling back to a
+          # hardcoded alternation — coo-memory#1010 was the smoking gun
+          # on the silent-miss class (pre-F9 hardcoded vade-* names
+          # silently missed all coo-* renamed repos).
+          # Precedent: coo-on-assign-reusable.yml lines 54-75.
+          repos_json="$(gh api repos/coo-labs/.github/contents/repos.yaml --jq '.content | @base64d' \
+            | yq -r '.repos[] | select(.status == "active" and .tier != "meta") | .name' \
+            | jq -R . | jq -s .)"
+          if [ -z "$repos_json" ] || [ "$repos_json" = "[]" ]; then
+            echo "::error::registry returned empty active-repo list; bailing rather than running hygiene with no repo alternation"
+            exit 1
+          fi
+          {
+            echo "active_repos<<EOF"
+            echo "$repos_json"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Check for closing keywords (Pattern B)
         uses: actions/github-script@v7
         env:
           PATTERN_B_MODE: ${{ inputs.pattern-b-mode }}
+          ACTIVE_REPOS_JSON: ${{ steps.registry.outputs.active_repos }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
@@ -158,7 +186,13 @@ jobs:
             const crossRepoRe = /\b(clos(?:e|es|ed|ing)|fix(?:es|ed|ing)?|resolv(?:e|es|ed|ing))\s+coo-labs\/[a-z0-9-]+#\d+\b/i;
             // Broken form: Closes <reponame>#N (no coo-labs/ prefix) — silently doesn't auto-close.
             // Detect to give a helpful error instead of just "missing keyword".
-            const brokenFormRe = /\b(clos(?:e|es|ed|ing)|fix(?:es|ed|ing)?|resolv(?:e|es|ed|ing))\s+vade-(coo-memory|runtime|core|governance|agent-logs)#\d+\b/i;
+            // Alternation built from the canonical registry at workflow time
+            // so future renames stay caught. Pre-F9 this was a hardcoded
+            // `vade-(coo-memory|runtime|core|governance|agent-logs)` literal,
+            // which silently missed every coo-* renamed repo (coo-memory#1010).
+            const activeSlugs = JSON.parse(process.env.ACTIVE_REPOS_JSON).map(s => s.replace(/\./g, '\\.'));
+            const slugAlt = activeSlugs.join('|');
+            const brokenFormRe = new RegExp(`\\b(clos(?:e|es|ed|ing)|fix(?:es|ed|ing)?|resolv(?:e|es|ed|ing))\\s+(${slugAlt})#\\d+\\b`, 'i');
             // Comma-list form: Closes #1, #2, #3 — only the first ref auto-closes.
             // GitHub's parser requires the keyword per issue. Detect to warn.
             const commaListRe = /\b(clos(?:e|es|ed|ing)|fix(?:es|ed|ing)?|resolv(?:e|es|ed|ing))\s+(?:#\d+|coo-labs\/[a-z0-9-]+#\d+)\s*,\s*(?:#\d+|coo-labs\/[a-z0-9-]+#\d+)/i;
@@ -276,6 +310,8 @@ jobs:
         # C+D is advisory and should still surface).
         if: ${{ !cancelled() }}
         uses: actions/github-script@v7
+        env:
+          ACTIVE_REPOS_JSON: ${{ steps.registry.outputs.active_repos }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
@@ -302,9 +338,26 @@ jobs:
             const advisories = [];
 
             // ---- Pattern C: cross-repo bare #N ----
-            // Detect bare #N adjacent to a vade-* repo cue suggesting
+            // Detect bare #N adjacent to an active-repo cue suggesting
             // cross-repo intent. Heuristic — emits suggestion, never blocks.
-            const crossRepoCues = /(vade-(?:runtime|core|governance|agent-logs)(?!#))[^\n]{0,80}#\d+/g;
+            // Alternation built from canonical registry at workflow time
+            // (same precedent as Pattern B). Pre-F9 this was a hardcoded
+            // `vade-(runtime|core|governance|agent-logs)` literal, which
+            // silently missed every coo-* renamed repo (coo-memory#1010).
+            const activeSlugs = JSON.parse(process.env.ACTIVE_REPOS_JSON).map(s => s.replace(/\./g, '\\.'));
+            const slugAlt = activeSlugs.join('|');
+            const crossRepoCues = new RegExp(`((?:${slugAlt})(?!#))[^\\n]{0,80}#\\d+`, 'g');
+            // Strip markdown link bodies (label kept, URL removed) and inline
+            // code spans before matching. The greedy 80-char window crosses
+            // link boundaries otherwise — false-positives on bodies like
+            // `[coo-harness#317](url). Per [coo-memory#939 comment N]`
+            // glued the URL of one link to the text of the next
+            // (coo-memory#976).
+            const stripLinksAndCode = s => s
+              .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+              .replace(/`[^`]*`/g, '');
+            const cleanBody = stripLinksAndCode(body);
+            const cleanTitle = stripLinksAndCode(title);
             // Carve-out: discussion references. `coo-labs/<repo>#N` autolinks
             // to an *issue* #N, not a discussion — discussions have no `#N`
             // autolink form at all, only literal URLs. Skip matches whose
@@ -312,12 +365,12 @@ jobs:
             // Worked example: `coo-labs/vade-canvas discussion #149` should NOT
             // be rewritten to `coo-labs/vade-canvas#149` (which would mis-resolve
             // to issue #149). coo-memory#476.
-            const cMatches = [...body.matchAll(crossRepoCues), ...title.matchAll(crossRepoCues)]
+            const cMatches = [...cleanBody.matchAll(crossRepoCues), ...cleanTitle.matchAll(crossRepoCues)]
               .filter(m => !/discussion/i.test(m[0]));
             if (cMatches.length > 0) {
               advisories.push(
                 `**Pattern C — cross-repo references**\n\n` +
-                `Detected ${cMatches.length} reference(s) where a vade-* repo is named ` +
+                `Detected ${cMatches.length} reference(s) where an active coo-labs/* repo is named ` +
                 `near a bare \`#N\`. Bare \`#N\` resolves to the host repo (${repo}); ` +
                 `use \`coo-labs/<repo>#N\` for cross-repo. ` +
                 `Examples found:\n\n` +
