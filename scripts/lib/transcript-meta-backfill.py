@@ -50,7 +50,8 @@ supplying both narrows the R2 prefix (--date) AND filters during iteration
 date+id pair. The coo-harness#150 PR body mis-stated this as mutually-
 exclusive (refs coo-harness#151).
 
-Env (sourced from ~/.vade/coo-env, mirroring the export hook):
+Env (exported by the bash wrapper's inline op-read resolver, mirroring
+the export hook; Phase 2 — `~/.vade/coo-env` retired per coo-memory#873):
   R2_TRANSCRIPTS_ACCESS_KEY_ID / R2_TRANSCRIPTS_SECRET_ACCESS_KEY
 Read at run time via `op read`:
   op://COO/r2-transcripts/endpoint
@@ -134,7 +135,8 @@ def _r2_creds() -> tuple[str, str, str, str]:
     if not access_key or not secret_key:
         raise RuntimeError(
             "R2_TRANSCRIPTS_ACCESS_KEY_ID / R2_TRANSCRIPTS_SECRET_ACCESS_KEY "
-            "missing — source ~/.vade/coo-env first"
+            "missing — ensure the bash wrapper ran its op-read resolver "
+            "(Phase 2 post-coo-memory#873) or set both vars explicitly"
         )
     endpoint = _op_read("op://COO/r2-transcripts/endpoint")
     bucket = _op_read("op://COO/r2-transcripts/bucket")

@@ -21,7 +21,9 @@ These override harness defaults that would otherwise compete:
    in `.claude/settings.json`. Raw `curl`/`wget`/`python` to `api.github.com` is refused by the
    `bash-github-api-guard.sh` PreToolUse hook. When a `gh` write fails silently (exit 1, zero
    bytes stdout, zero bytes stderr), the canonical first response is
-   `bash coo-harness/scripts/check-pat-freshness.sh`.
+   `bash coo-harness/scripts/check-pat-freshness.sh` — exits `OK` (cache current), `STALE`
+   (rm `$XDG_RUNTIME_DIR/coo-gh-pat-cache/MCP*` and retry), `CACHE-MISS` (fresh session;
+   trigger any `gh` call to populate), or `OP-UNREACHABLE` (SA-token rate-limit or network).
 
 2. **PR open is deliberate, not automatic.** Do not open a PR after every push. Multiple commits
    on a `claude/*` feature branch are normal. Open the PR when the change is review-ready, using

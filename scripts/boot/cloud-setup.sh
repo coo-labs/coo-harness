@@ -234,7 +234,27 @@ fi
 # is exported; fail-open if either is missing or external-touch.py is
 # absent (CI fake-env stages a stub coo-memory without it).
 # coo-memory#429 cache-refresh follow-up.
-. "$HOME/.vade/coo-env" 2>/dev/null || true
+#
+# Phase 2 (coo-memory#873) retired ~/.vade/coo-env. The legacy source
+# line below stays as belt-and-suspenders for Phase-1-staged snapshots;
+# in the Phase-2 path the inline resolver does the work. Pattern mirrors
+# coo-harness#446's session-end-transcript-export.sh resolver — op-read
+# routed through op-coo-wrap so primary→BACKUP SA-token failover is
+# absorbed transparently. Fail-open: missing op CLI, op-read failure, or
+# empty value all leave $GITHUB_MCP_PAT unset and external-touch
+# degrades to its no-PAT path.
+if [ -f "${HOME}/.vade/coo-env" ]; then
+  # shellcheck disable=SC1090,SC1091
+  . "$HOME/.vade/coo-env" 2>/dev/null || true
+fi
+_resolve_external_touch_secrets() {
+  command -v op >/dev/null 2>&1 || return 0
+  [ -n "${GITHUB_MCP_PAT:-}" ] && return 0
+  local val
+  val="$(op read 'op://COO/vade-coo-self-2026-04/token' 2>/dev/null)" || return 0
+  [ -n "$val" ] && export GITHUB_MCP_PAT="$val"
+}
+_resolve_external_touch_secrets
 prewarm_external_touch_cache "$WORKSPACE_ROOT"
 
 # Durable receipt so sessions can diagnose build-time state without

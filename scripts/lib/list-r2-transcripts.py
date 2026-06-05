@@ -58,7 +58,8 @@ def _r2_creds() -> tuple[str, str, str, str]:
     if not access_key or not secret_key:
         raise RuntimeError(
             "R2_TRANSCRIPTS_ACCESS_KEY_ID / R2_TRANSCRIPTS_SECRET_ACCESS_KEY "
-            "missing — source ~/.vade/coo-env first"
+            "missing — ensure the bash wrapper ran its op-read resolver "
+            "(Phase 2 post-coo-memory#873) or set both vars explicitly"
         )
     endpoint = _op_read("op://COO/r2-transcripts/endpoint")
     bucket = _op_read("op://COO/r2-transcripts/bucket")

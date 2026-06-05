@@ -39,7 +39,8 @@ cache directory can accumulate. Per the security review for #64,
 decrypted jsonl is "strictly more revealing than session summaries"
 and should not sit on disk indefinitely.
 
-Required env (sourced from ~/.vade/coo-env by the bash wrapper):
+Required env (exported by the bash wrapper's inline op-read resolver;
+Phase 2 — `~/.vade/coo-env` retired per coo-memory#873):
   R2_TRANSCRIPTS_ACCESS_KEY_ID, R2_TRANSCRIPTS_SECRET_ACCESS_KEY
   TRANSCRIPTS_AGE_IDENTITY      — full AGE-SECRET-KEY-1... line
 Read at run time via op (no env exposure):
