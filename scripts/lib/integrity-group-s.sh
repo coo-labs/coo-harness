@@ -136,12 +136,27 @@ s_check_S2() {
     return
   fi
 
+  # Post-Phase-2 the integrity-check subprocess does not inherit secrets
+  # exported by coo-bootstrap.sh's fetch_coo_secrets — Phase 2 (#873)
+  # retired both settings.json::env and /root/.vade/coo-env, so the
+  # process env this hook sees is structurally empty of declared
+  # env-aliases regardless of whether bootstrap succeeded.
+  #
+  # fetch_coo_secrets writes a keynames-only sentinel to
+  # ${HOME}/.vade/.bootstrap-exports listing the env-aliases it
+  # successfully exported. S2 accepts that file as proof of export when
+  # the alias isn't visible in this process's env.
+  local exports_sentinel="${HOME}/.vade/.bootstrap-exports"
   local total=0 missing=()
   while IFS='|' read -r id status alias; do
     [ -z "$alias" ] && continue
     total=$((total + 1))
     eval "val=\${$alias:-}"
     if [ -z "${val:-}" ]; then
+      # Fallback: did bootstrap successfully export this alias?
+      if [ -f "$exports_sentinel" ] && grep -Fxq "$alias" "$exports_sentinel" 2>/dev/null; then
+        continue
+      fi
       missing+=("${id}:${alias}")
     fi
   done <<< "$rows"
@@ -274,9 +289,13 @@ s_check_S3() {
             # space).
             local file_only
             file_only="${path_or_name%% *}"
-            # Expand ~ to $HOME if present.
+            # Expand ~ to $HOME if present. The pattern is single-quoted
+            # because bash performs tilde expansion on the word in
+            # ${var#word} (per bash man page §"Parameter Expansion") —
+            # unquoted `~/` expands to `$HOME/` and the strip pattern
+            # then doesn't match the literal `~/` in the variable.
             case "$file_only" in
-              "~/"*) file_only="$HOME/${file_only#~/}" ;;
+              "~/"*) file_only="$HOME/${file_only#'~/'}" ;;
             esac
             if [ -z "$file_only" ] || [ ! -e "$file_only" ]; then
               missing+=("${cred_id}:${surface}:file-absent:$file_only")
@@ -579,16 +598,26 @@ s_check_S7() {
     return
   fi
 
-  # Collect every regex from secret_shapes, paired with its name.
+  # Collect every regex from secret_shapes, paired with its name and
+  # the optional match_required flag (default true). Patterns with
+  # match_required: false are documented justified exceptions per
+  # SOP §9 ("every S-invariant passes or carries justified exception")
+  # — defense-only patterns with no VADE consumer, chicken-and-egg
+  # (op-service-account-token), empty-op-item (github-pat-classic-public),
+  # multi-field-primary-mismatch (aws-access-key-id). See #1198.
   local pat_rows
-  pat_rows="$(yq -r '.secret_shapes[] | (.name + "|" + .pattern)' "$schema" 2>/dev/null)" || pat_rows=""
+  # NOTE: yq's `// true` alternative operator treats `false` as null,
+  # collapsing match_required=false to true. Explicit conditional avoids that.
+  pat_rows="$(yq -r '.secret_shapes[] | (.name + "|" + .pattern + "|" + (if .match_required == false then "false" else "true" end))' "$schema" 2>/dev/null)" || pat_rows=""
 
-  # Direction 1: orphan regex — for every pattern, ≥1 credential value
-  # must match. A pattern with zero matches is "orphan".
+  # Direction 1: orphan regex — for every pattern with match_required=true,
+  # ≥1 credential value must match. A pattern with zero matches is "orphan".
+  # Patterns with match_required=false skip this check.
   local orphan_patterns=()
-  while IFS='|' read -r pname ppat; do
+  while IFS='|' read -r pname ppat pmatch; do
     [ -z "$pname" ] && continue
     [[ "$ppat" == TBD* ]] && continue
+    [ "$pmatch" = "false" ] && continue
     local hit=0
     for cred_id in "${!_s7_values[@]}"; do
       if printf '%s' "${_s7_values[$cred_id]}" | grep -qE "$ppat"; then
