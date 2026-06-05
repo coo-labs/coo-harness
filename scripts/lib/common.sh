@@ -2010,9 +2010,50 @@ install_coo_ssh_keys() {
   fi
 }
 
+# Record a per-call op-read observability event to
+# ~/.vade/op-read-failures.jsonl. Called by _op_to_file when the
+# enclosing retry loop either failed outright or burned non-trivial
+# wall time (>1s, indicating at least one retry fired). Pairs with the
+# op-coo-wrap tracer (/dev/shm/coo-op-wrap.trace) to surface the actual
+# error shape behind the install_coo_ssh_keys first-attempt FAIL pattern
+# (coo-harness#451). The jsonl is read by integrity-check.sh's D7 probe;
+# operators can also tail it directly to triage a single boot.
+_record_op_read_event() {
+  local ref="$1" rc="$2" elapsed_ms="$3" pref_before="$4" pref_after="$5"
+  local err_file="${6:-/dev/null}"
+  local log_file="${HOME}/.vade/op-read-failures.jsonl"
+  mkdir -p "$(dirname "$log_file")" 2>/dev/null || true
+  check_cmd python3 || return 0
+  python3 - "$ref" "$rc" "$elapsed_ms" "$pref_before" "$pref_after" "$err_file" "$log_file" <<'PY' 2>/dev/null || true
+import sys, json, datetime
+ref, rc, elapsed_ms, pref_before, pref_after, err_file, log_file = sys.argv[1:]
+err_tail = ""
+try:
+    with open(err_file, "r", errors="replace") as f:
+        err_tail = f.read()[-240:]
+except Exception:
+    pass
+def _int(v, default=0):
+    try: return int(v)
+    except Exception: return default
+event = {
+    "ts": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "kind": "op_read",
+    "ref": ref,
+    "rc": _int(rc, rc),
+    "elapsed_ms": _int(elapsed_ms),
+    "op_wrap_pref_before": pref_before,
+    "op_wrap_pref_after": pref_after,
+    "stderr_tail": err_tail,
+}
+with open(log_file, "a") as f:
+    f.write(json.dumps(event, separators=(",", ":")) + "\n")
+PY
+}
+
 _op_to_file() {
   local ref="$1" path="$2" mode="$3"
-  local content
+  local content rc=0 err_file pref_before pref_after start_ms end_ms elapsed_ms
   # 5 attempts (sleeps 1+2+4+8 = 15s of tolerance) absorbs 1Password
   # service-account cold-start latency on first `op read` of a fresh
   # container. Observed on run-2026-04-22T091701: first bootstrap
@@ -2020,7 +2061,28 @@ _op_to_file() {
   # (`VADE_FORCE_COO_BOOTSTRAP=1`) succeeded after 2 retries on the
   # same ref, suggesting 3 attempts was inside the cold-start window
   # but 5 clears it comfortably.
-  if ! content="$(retry 5 op read "$ref")"; then
+  err_file="$(mktemp 2>/dev/null || echo "/tmp/op-to-file.$$.err")"
+  : > "$err_file"
+  pref_before="$(cat "${XDG_RUNTIME_DIR:-/tmp}/coo-op-wrap/active" 2>/dev/null || echo "?")"
+  start_ms="$(date -u +%s%3N 2>/dev/null || echo 0)"
+  # Capture stderr from the retry chain to err_file so we can both
+  # (a) replay it to the operator (preserving prior log behavior) and
+  # (b) record its tail in the structured jsonl event for #451.
+  content="$(retry 5 op read "$ref" 2>"$err_file")" || rc=$?
+  end_ms="$(date -u +%s%3N 2>/dev/null || echo 0)"
+  pref_after="$(cat "${XDG_RUNTIME_DIR:-/tmp}/coo-op-wrap/active" 2>/dev/null || echo "?")"
+  elapsed_ms=$((end_ms - start_ms))
+  # Preserve prior stderr behavior — retry already wrote its diagnostic
+  # lines to err_file; replay them so existing log consumers see them.
+  cat "$err_file" >&2 2>/dev/null || true
+  # Observability: record when the call failed or took non-trivial time
+  # (>1s strongly suggests at least one retry attempt; a clean cold cache
+  # hit is sub-second). Logging every success would be too noisy.
+  if [ "$rc" -ne 0 ] || [ "$elapsed_ms" -gt 1000 ]; then
+    _record_op_read_event "$ref" "$rc" "$elapsed_ms" "$pref_before" "$pref_after" "$err_file"
+  fi
+  rm -f "$err_file"
+  if [ "$rc" -ne 0 ]; then
     log "Failed to read $ref after retries"
     return 1
   fi

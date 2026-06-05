@@ -19,6 +19,28 @@ set -euo pipefail
 
 KEYDIR="${VADE_CI_MOCK_KEYDIR:-/tmp/vade-ci-mocks/keys}"
 
+# Failure injection for the retry-recovery test (coo-harness#451).
+# When VADE_CI_MOCK_OP_FAIL_N is a positive integer, the next N `op read`
+# invocations return non-zero with rate-limit-shaped stderr. State lives
+# in a counter file so it survives across subshells inside a single CI
+# run; the file is recreated per test invocation. Subcommands other than
+# `read` are not affected (the bootstrap calls `op whoami` and `op run`
+# without retry budgets — failing those would mask the test's intent).
+if [ "${1:-}" = "read" ] \
+   && [ -n "${VADE_CI_MOCK_OP_FAIL_N:-}" ] \
+   && [ "${VADE_CI_MOCK_OP_FAIL_N}" -gt 0 ] 2>/dev/null; then
+  _MOCK_COUNTER_FILE="${VADE_CI_MOCK_OP_FAIL_COUNTER:-/tmp/vade-ci-mock-op-fail-counter}"
+  _MOCK_CURRENT="$(cat "$_MOCK_COUNTER_FILE" 2>/dev/null || echo 0)"
+  if [ "$_MOCK_CURRENT" -lt "$VADE_CI_MOCK_OP_FAIL_N" ] 2>/dev/null; then
+    _MOCK_NEXT=$((_MOCK_CURRENT + 1))
+    mkdir -p "$(dirname "$_MOCK_COUNTER_FILE")" 2>/dev/null || true
+    echo "$_MOCK_NEXT" > "$_MOCK_COUNTER_FILE"
+    printf '[mock op] injected failure %d/%d: Too many requests. Your client has been rate-limited.\n' \
+      "$_MOCK_NEXT" "$VADE_CI_MOCK_OP_FAIL_N" >&2
+    exit 1
+  fi
+fi
+
 case "${1:-}" in
   --version)
     echo "2.31.0 (vade-ci mock)"

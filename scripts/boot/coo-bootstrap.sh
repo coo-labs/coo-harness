@@ -227,6 +227,15 @@ fi
 log "coo-bootstrap: starting"
 bootstrap_log_record START "VADE_FORCE_COO_BOOTSTRAP=${VADE_FORCE_COO_BOOTSTRAP:-0}"
 
+# Enable op-coo-wrap decision tracing for the bootstrap process and any
+# child processes that inherit env. The shim writes one line per op-read
+# decision (which token, swap or not, rate-limit detected) to
+# /dev/shm/coo-op-wrap.trace. Pairs with _op_to_file's per-call jsonl
+# event in ~/.vade/op-read-failures.jsonl to surface the actual error
+# shape behind install_coo_ssh_keys first-attempt FAIL (coo-harness#451).
+# Container-ephemeral; zero cost when the file isn't written.
+export COO_OP_WRAP_TRACE=1
+
 COO_BOOTSTRAP_STEP="ensure_op_cli"
 ensure_op_cli
 
