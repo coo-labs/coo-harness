@@ -1964,10 +1964,10 @@ install_coo_ssh_keys() {
   chmod 700 "$ssh_dir"
   log "Installing COO SSH keys into $ssh_dir"
 
-  _op_to_file "op://COO/vade-coo-auth/private key" "$ssh_dir/vade-coo-auth"     0600 || return 1
-  _op_to_file "op://COO/vade-coo-auth/public key"  "$ssh_dir/vade-coo-auth.pub" 0644 || return 1
-  _op_to_file "op://COO/vade-coo-sign/private key" "$ssh_dir/vade-coo-sign"     0600 || return 1
-  _op_to_file "op://COO/vade-coo-sign/public key"  "$ssh_dir/vade-coo-sign.pub" 0644 || return 1
+  _op_to_file "op://COO/vade-coo-ssh-auth/private key" "$ssh_dir/vade-coo-auth"     0600 || return 1
+  _op_to_file "op://COO/vade-coo-ssh-auth/public key"  "$ssh_dir/vade-coo-auth.pub" 0644 || return 1
+  _op_to_file "op://COO/vade-coo-ssh-sign/private key" "$ssh_dir/vade-coo-sign"     0600 || return 1
+  _op_to_file "op://COO/vade-coo-ssh-sign/public key"  "$ssh_dir/vade-coo-sign.pub" 0644 || return 1
 
   if ensure_openssh_client; then
     local fp_auth fp_sign

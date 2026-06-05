@@ -59,10 +59,10 @@ install_id="${GITHUB_APP_INSTALLATION_ID:-}"
 private_key="${GITHUB_APP_PRIVATE_KEY:-}"
 
 if [ -z "$app_id" ]; then
-  app_id="$(op read 'op://COO/vade-coo-app/app_id' 2>/dev/null || true)"
+  app_id="$(op read 'op://COO/github-app-vade-coo/app_id' 2>/dev/null || true)"
 fi
 if [ -z "$install_id" ]; then
-  install_id="$(op read 'op://COO/vade-coo-app/installation_id' 2>/dev/null || true)"
+  install_id="$(op read 'op://COO/github-app-vade-coo/installation_id' 2>/dev/null || true)"
 fi
 # Phase 2 follow-up: check tmpfs cache populated by bootstrap's
 # materialize_app_key_cache before falling back to op-read. The cache is
@@ -79,7 +79,7 @@ if [ -z "$private_key" ]; then
   done
 fi
 if [ -z "$private_key" ]; then
-  private_key="$(op read 'op://COO/vade-coo-app/private_key' 2>/dev/null || true)"
+  private_key="$(op read 'op://COO/github-app-vade-coo/private_key' 2>/dev/null || true)"
 fi
 
 if [ -z "$app_id" ] || [ -z "$install_id" ] || [ -z "$private_key" ]; then

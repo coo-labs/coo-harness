@@ -97,7 +97,7 @@ _resolve_pat() {
         printf '%s' "$GITHUB_MCP_PAT"
         return 0
       fi
-      op_path="op://COO/vade-coo-self-2026-04/token"
+      op_path="op://COO/github-pat-vade-coo/token"
       ;;
     PUBLIC)
       if [ -n "${GITHUB_PUBLIC_PAT:-}" ]; then
@@ -110,7 +110,7 @@ _resolve_pat() {
       # surfaced the bug for the first time mid-session. The new S9
       # invariant in integrity-group-s.sh cross-checks hardcoded op-paths
       # like this against schema.yaml::credentials[] to prevent re-regression.
-      op_path="op://COO/GITHUB_PUBLIC_PAT/credential"
+      op_path="op://COO/github-pat-classic-public/credential"
       ;;
     *) return 0 ;;
   esac

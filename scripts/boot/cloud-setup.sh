@@ -251,7 +251,7 @@ _resolve_external_touch_secrets() {
   command -v op >/dev/null 2>&1 || return 0
   [ -n "${GITHUB_MCP_PAT:-}" ] && return 0
   local val
-  val="$(op read 'op://COO/vade-coo-self-2026-04/token' 2>/dev/null)" || return 0
+  val="$(op read 'op://COO/github-pat-vade-coo/token' 2>/dev/null)" || return 0
   [ -n "$val" ] && export GITHUB_MCP_PAT="$val"
 }
 _resolve_external_touch_secrets

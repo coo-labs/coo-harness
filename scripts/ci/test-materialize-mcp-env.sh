@@ -62,11 +62,11 @@ _stage_templates() {
   cat > "$dir/scripts/lib/mcp-env-templates/mem0.env" <<'EOF'
 # MCP env template for mem0.
 # Comment line preserved.
-MEM0_API_KEY=op://COO/mem0-vade-coo/credential
+MEM0_API_KEY=op://COO/mem0-api-vade-coo/credential
 EOF
   cat > "$dir/scripts/lib/mcp-env-templates/agentmail.env" <<'EOF'
 # MCP env template for agentmail.
-AGENTMAIL_API_KEY=op://COO/agentmail-vade-coo/credential
+AGENTMAIL_API_KEY=op://COO/agentmail-api-vade-coo/credential
 EOF
   cat > "$dir/scripts/lib/mcp-env-templates/1password.env" <<'EOF'
 # No op:// refs — passes through unchanged.
@@ -152,7 +152,7 @@ _run_materialize "$TEST2_DIR" env -u MEM0_API_KEY \
   XDG_RUNTIME_DIR="$TEST_ROOT/runtime2"
 
 mem0_content="$(cat "$_OUT_DIR/mem0.env")"
-_assert_contains "test 2: unresolved MEM0 op:// ref preserved" "MEM0_API_KEY=op://COO/mem0-vade-coo/credential" "$mem0_content"
+_assert_contains "test 2: unresolved MEM0 op:// ref preserved" "MEM0_API_KEY=op://COO/mem0-api-vade-coo/credential" "$mem0_content"
 am_content="$(cat "$_OUT_DIR/agentmail.env")"
 _assert_contains "test 2: AGENTMAIL still resolves" "AGENTMAIL_API_KEY=am_TEST2_VALUE" "$am_content"
 
