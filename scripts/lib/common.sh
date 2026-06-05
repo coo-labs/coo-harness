@@ -686,6 +686,17 @@ MEM0_MCP_SERVER_VERSION_DEFAULT="0.2.1"
 # workflow. ~131 MB tarball — the largest single tool in the snapshot.
 # Track upstream at github.com/quarto-dev/quarto-cli.
 QUARTO_VERSION_DEFAULT="1.9.37"
+# PyYAML — system-Python YAML parser. Required by schema-fetch-secrets.py
+# (boot path; fail-closed without it) and by every hook that parses the
+# secrets schema (boot-brake-guard.py, skill-yaml-guard.sh,
+# bash-token-guard.sh, preuse-agent-env-scrub.sh, postuse-bash-redactor.sh).
+# Currently satisfied by the Debian base image's python3-yaml package; this
+# pin defends against a future image rebuild silently dropping it.
+# ensure_pyyaml installs to /home/user/.local/lib/python3.X/site-packages
+# via `pip install --user --break-system-packages` with PYTHONUSERBASE
+# pointed at /home/user/.local so the install survives snapshot → resume.
+# coo-harness#440.
+PYYAML_VERSION_DEFAULT="6.0.2"
 # Binary vendor bundle. Single tarball published by
 # .github/workflows/publish-binary-vendor.yml containing op + gh + uv +
 # mem0-mcp-server (with mem0's uv-managed venv tree) at production
@@ -1333,6 +1344,71 @@ ensure_quarto_cli() {
   log "Installed quarto v${version}"
 }
 
+# Snapshot-persistent PyYAML for the system python3 interpreter.
+#
+# schema-fetch-secrets.py and several PreToolUse / PostToolUse hooks
+# (boot-brake-guard.py, skill-yaml-guard.sh, bash-token-guard.sh,
+# preuse-agent-env-scrub.sh, postuse-bash-redactor.sh) all `import yaml`
+# from the system python3. Currently satisfied by the Debian base image's
+# `python3-yaml` package; this function defends against a future image
+# rebuild that drops it.
+#
+# Install layout: PYTHONUSERBASE=/home/user/.local with
+# `pip install --user --break-system-packages PyYAML==<pin>`. The user
+# site lands at /home/user/.local/lib/python3.X/site-packages, under the
+# snapshot-persistent /home/user tree. PYTHONUSERBASE in settings.json
+# env (written by _write_claude_settings_paths) lets Claude Code's tool
+# hooks pick it up on resume; common.sh-sourcing scripts inherit it via
+# the export below.
+#
+# Short-circuits when system python3 already has PyYAML >= 6 importable —
+# the common case while the base image still ships python3-yaml. In the
+# defensive case (base image drops PyYAML), the install runs once at
+# build time and the resulting site-packages survives every resume.
+#
+# Returns 0 when PyYAML is importable at the end of the run; 1 on a
+# total failure (no pip-resolvable PyYAML and no fallback). Fail-open at
+# the caller: a 1 return is loud (logs FATAL) but lets cloud-setup.sh
+# continue — fetch_coo_secrets surfaces the gap fatally at first use.
+ensure_pyyaml() {
+  local userbase="/home/user/.local"
+  # Export for the rest of this shell (and any child processes invoked
+  # before _write_claude_settings_paths runs) so python3 finds the
+  # snapshot-persistent user-site without an extra env nudge per call.
+  export PYTHONUSERBASE="$userbase"
+
+  if python3 -c "import yaml, sys; sys.exit(0 if tuple(int(p) for p in yaml.__version__.split('.')[:2]) >= (6, 0) else 1)" 2>/dev/null; then
+    local existing_version existing_path
+    existing_version="$(python3 -c 'import yaml; print(yaml.__version__)' 2>/dev/null)"
+    existing_path="$(python3 -c 'import yaml, os; print(os.path.dirname(yaml.__file__))' 2>/dev/null)"
+    log "PyYAML present: ${existing_version} (${existing_path})"
+    return 0
+  fi
+
+  if ! check_cmd python3; then
+    log "ensure_pyyaml: FATAL — python3 missing; cannot install PyYAML"
+    return 1
+  fi
+
+  local version="${PYYAML_VERSION:-$PYYAML_VERSION_DEFAULT}"
+  log "Installing PyYAML==${version} → ${userbase}/lib/python\$X/site-packages"
+  # --break-system-packages bypasses PEP 668's EXTERNALLY-MANAGED marker
+  # on Debian. We're installing to the user site (not /usr/lib), so this
+  # does not actually overwrite any Debian-managed package.
+  if PYTHONUSERBASE="$userbase" python3 -m pip install \
+       --user --break-system-packages --no-cache-dir --upgrade \
+       "PyYAML==${version}" >/dev/null 2>&1; then
+    if python3 -c "import yaml" 2>/dev/null; then
+      log "Installed PyYAML: $(python3 -c 'import yaml; print(yaml.__version__)' 2>/dev/null) ($(python3 -c 'import yaml, os; print(os.path.dirname(yaml.__file__))' 2>/dev/null))"
+      return 0
+    fi
+    log "ensure_pyyaml: install reported success but import still fails"
+    return 1
+  fi
+  log "ensure_pyyaml: FATAL — PyYAML install failed (network or PyPI flake at build time?)"
+  return 1
+}
+
 # Expose gh on Claude Code's Bash-tool PATH every session.
 #
 # ensure_gh_cli installs to /home/user/.local/bin so the binary survives
@@ -1885,8 +1961,19 @@ _write_claude_settings_paths() {
   # this is a non-secret path-state value with no PAT-validation gate.
   local uv_cache_dir="/home/user/.cache/uv"
 
+  # PYTHONUSERBASE points the system python3's user site at the
+  # snapshot-persistent /home/user/.local/ tree. ensure_pyyaml installs
+  # PyYAML there at build time as a defensive backstop against a future
+  # base image dropping python3-yaml; the export here lets Claude Code's
+  # tool hooks (boot-brake-guard.py, skill-yaml-guard.sh, etc.) find the
+  # install on every resume without sourcing common.sh. Default user-base
+  # would be /root/.local/, which is reset on each cloud resume — useless
+  # for snapshot persistence. coo-harness#440.
+  local python_userbase="/home/user/.local"
+
   VADE_CLOUD_STATE_DIR="$cloud_state_dir" VADE_BINDIR="$bindir" \
-  VADE_LIVE_PATH="$live_path" UV_CACHE_DIR="$uv_cache_dir" node -e '
+  VADE_LIVE_PATH="$live_path" UV_CACHE_DIR="$uv_cache_dir" \
+  PYTHONUSERBASE="$python_userbase" node -e '
     const fs = require("fs");
     const path = process.argv[1];
     let cfg = {};
@@ -1910,6 +1997,9 @@ _write_claude_settings_paths() {
     }
     if (process.env.UV_CACHE_DIR) {
       merged.UV_CACHE_DIR = process.env.UV_CACHE_DIR;
+    }
+    if (process.env.PYTHONUSERBASE) {
+      merged.PYTHONUSERBASE = process.env.PYTHONUSERBASE;
     }
     cfg.env = merged;
     fs.writeFileSync(path, JSON.stringify(cfg, null, 2) + "\n");

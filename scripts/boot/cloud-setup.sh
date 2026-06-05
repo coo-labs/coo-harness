@@ -186,6 +186,25 @@ else
   log "Warning: quarto install failed at build time; first session that uses it will pay a ~131 MB direct-fetch."
 fi
 
+# Defensive PyYAML install — schema-fetch-secrets.py and several boot
+# hooks `import yaml` from the system python3. The Debian base image
+# currently ships python3-yaml; this re-installs PyYAML into a snapshot-
+# persistent path (/home/user/.local/lib/python3.X/site-packages) so a
+# future image rebuild can't silently drop it. Pinned in versions.lock.
+# coo-harness#440.
+#
+# Best-effort: a failure here doesn't fail the build. The short-circuit
+# fires when PyYAML is already importable (the common case while the
+# base image ships it), so failure only matters when the defensive path
+# is actually exercised — at which point fetch_coo_secrets surfaces the
+# gap fatally at first use, and the brake pins to FAIL.
+if ensure_pyyaml; then
+  build_log_record OK "cloud-setup: PyYAML present (system or installed at build time)"
+else
+  build_log_record WARN "cloud-setup: ensure_pyyaml failed; schema-fetch-secrets.py will fail closed if base-image python3-yaml is absent"
+  log "Warning: ensure_pyyaml failed; if the base image lacks python3-yaml, coo-bootstrap will fail at fetch_coo_secrets."
+fi
+
 # Pre-fetch the 1Password MCP server (@takescake/1password-mcp) so
 # first-session `npx -y` resolves offline. Closes the rotated-PAT →
 # restart class (coo-harness#164): the MCP can re-read secrets mid-session
