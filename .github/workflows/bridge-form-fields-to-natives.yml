@@ -20,7 +20,7 @@ name: Bridge issue-form widgets to native fields (reusable)
 #   - `secrets.VADE_FIELDS_ADMIN_PAT` — fine-grained PAT with
 #     org-level Issue fields write scope. Org-level secret slot;
 #     holds the same value as the COO's `GITHUB_MCP_PAT` env var
-#     (the COO PAT at `op://COO/vade-coo-self-2026-04/token`),
+#     (the COO PAT at `op://COO/github-pat-vade-coo/token`),
 #     renamed around the GitHub Actions reserved `GITHUB_*` prefix
 #     per coo-memory#848. When the COO PAT rotates, this org
 #     secret slot needs the new value pasted in too (third rotation
@@ -69,7 +69,7 @@ jobs:
         uses: 1password/load-secrets-action@v2
         env:
           OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-          VADE_FIELDS_ADMIN_PAT: op://COO/vade-coo-self-2026-04/token
+          VADE_FIELDS_ADMIN_PAT: op://COO/github-pat-vade-coo/token
         with:
           export-env: true
 
