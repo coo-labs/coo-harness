@@ -34,11 +34,19 @@ fi
 
 OUT_FILE="${VADE_CLOUD_STATE_DIR}/integrity-check.json"
 
-# Unlink any prior-session output: the writers below swallow write failures,
-# so without this a failed write leaves stale data masquerading as current.
-# Loud absence is the right polarity for the CLAUDE.md step-1 gate.
+# Phase gate. `fast` skips Group E (live network probes, 30–115 s) so
+# the boot-path call from coo-bootstrap's exit trap completes in <1 s.
+# `live` (default) runs every group. The post-bootstrap chain re-runs
+# in `live` mode in the background to refresh E group results without
+# blocking the boot banner. See post-bootstrap-chain.sh.
+VADE_INTEGRITY_PHASE="${VADE_INTEGRITY_PHASE:-live}"
+
+# Atomic-write target — write to .tmp, rename into place. Previous
+# revisions `rm -f`-then-rewrote the destination directly; any consumer
+# reading during the write window (boot-brake-guard.py parses_json,
+# digest summary read) saw a partial file. Atomic rename eliminates
+# the window without changing semantics for steady-state readers.
 mkdir -p "$(dirname "$OUT_FILE")" 2>/dev/null || true
-rm -f "$OUT_FILE"
 
 RUNTIME_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 # Workspace root: parent of vade-runtime. /home/user on cloud,
@@ -363,6 +371,18 @@ else
 fi
 
 # ── Group E: MCP surface ─────────────────────────────────────
+# Phase gate. `fast` (the boot-path call from coo-bootstrap's exit
+# trap) marks E1–E9 as `pending` and skips the live probes entirely,
+# so bootstrap finishes in <1 s. The post-bootstrap chain re-runs in
+# the default `live` phase to refresh E group results in the
+# background after the boot banner has rendered.
+if [ "$VADE_INTEGRITY_PHASE" = "fast" ]; then
+  for _e in E1 E2 E3 E4 E5 E6 E7 E8 E9; do
+    _add "$_e" skip "phase=fast: live MCP probes deferred; refreshed by post-bootstrap-chain live pass"
+  done
+fi
+
+if [ "$VADE_INTEGRITY_PHASE" != "fast" ]; then
 # Requires MCP tool calls (get_me on github and github-coo namespaces).
 # An agent invoking this directly should fill E1/E2/E3/E4 into the
 # JSON afterwards. CI skips E1-E4 entirely. E5 is a script-level probe
@@ -890,6 +910,7 @@ else
   fi
 fi
 _add E9 "$E9_ok" "$E9_detail"
+fi  # close VADE_INTEGRITY_PHASE != "fast" gate around Group E
 
 # ── Group F: Culture-system substrate discipline ─────────────
 # Implements E1–E4 from foundations/2026-04-22_we-can-claim-a-record.md
@@ -1412,7 +1433,9 @@ if check_cmd node; then
       summary: { ok: degraded.length === 0, passed: okCount, total, degraded },
       groups,
     };
-    fs.writeFileSync(outFile, JSON.stringify(out, null, 2) + "\n");
+    const tmpFile = outFile + ".tmp." + process.pid;
+    fs.writeFileSync(tmpFile, JSON.stringify(out, null, 2) + "\n");
+    fs.renameSync(tmpFile, outFile);
     const tag = out.summary.ok ? "OK" : "DEGRADED";
     process.stderr.write(`VADE integrity: ${okCount}/${total} ${tag}`
       + (degraded.length ? ` — degraded (${degraded.join(",")})` : "")
@@ -1421,12 +1444,15 @@ if check_cmd node; then
     echo "[vade-setup] integrity-check: node writer failed; leaving stale file" >&2
   }
 else
-  # Fallback: newline-separated triples, no JSON.
+  # Fallback: newline-separated triples, no JSON. Atomic write via
+  # tmpfile + mv so consumers don't observe a partial file.
+  _tmp_fallback="${OUT_FILE}.tmp.$$"
   {
     printf 'checked_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'session_id=%s\n' "${CLAUDE_CODE_SESSION_ID:-unknown}"
     printf '%s\n' "${RESULTS[@]}"
-  } > "$OUT_FILE" 2>/dev/null || true
+  } > "$_tmp_fallback" 2>/dev/null && mv -f "$_tmp_fallback" "$OUT_FILE" 2>/dev/null || true
+  rm -f "$_tmp_fallback" 2>/dev/null || true
   echo "[vade-setup] integrity-check: node missing; wrote key=value file to $OUT_FILE" >&2
 fi
 

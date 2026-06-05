@@ -74,29 +74,12 @@ SKIP_SENTINEL="${HOME}/.vade/.coo-bootstrap-skip-reason"
 # unmissable; combined with CLAUDE.md step 1 reading the JSON file,
 # the agent's first action on a degraded boot is surface-to-BDFL.
 #
-# Wait for coo-bootstrap.sh's per-session finalize sentinel before
-# reading the JSON. Both hooks run in parallel under SessionStart:startup;
-# without this sync the JSON we read below would reflect mid-bootstrap
-# state and produce stale BOOT DEGRADED banners on otherwise-green boots.
-# coo-bootstrap.sh runs integrity-check.sh at the tail of its EXIT trap
-# and writes the sentinel containing CLAUDE_CODE_SESSION_ID; we match on
-# that to avoid picking up a stale sentinel from a prior session.
-_wait_for_bootstrap_finalized() {
-  local sentinel="$HOME/.vade/.coo-bootstrap-finalized"
-  local our_session="${CLAUDE_CODE_SESSION_ID:-unknown}"
-  local timeout="${VADE_DIGEST_BOOTSTRAP_TIMEOUT:-60}"
-  local waited=0
-  while [ "$waited" -lt "$timeout" ]; do
-    if [ -f "$sentinel" ] \
-       && [ "$(cat "$sentinel" 2>/dev/null || true)" = "$our_session" ]; then
-      return 0
-    fi
-    sleep 1
-    waited=$((waited + 1))
-  done
-  return 1
-}
-_wait_for_bootstrap_finalized || true
+# Per-session sentinel wait removed. The digest now runs as an ordered
+# child of coo-bootstrap.sh via post-bootstrap-chain.sh; bootstrap has
+# already written integrity-check.json (atomic) and exported its env
+# into our scope before this script starts. The race surface is gone
+# by construction — no wait, no timeout, no fall-through to "unknown".
+# See the architectural rule memo paired with this change.
 
 _integrity_ok="unknown"
 _integrity_passed="?"
@@ -177,6 +160,19 @@ elif [ "$_integrity_ok" = "true" ]; then
   # still see the result at first screen).
   echo "───────────────────────────────────────────────────────────────"
   echo "Boot integrity: summary.ok=true  ($_integrity_passed/$_integrity_total)  — full report: $INTEGRITY_CHECK"
+  echo "───────────────────────────────────────────────────────────────"
+  echo ""
+else
+  # Defensive: with the structural collapse (digest runs as a child
+  # of coo-bootstrap, integrity-check writes atomically before this
+  # script starts) this branch should be unreachable. Emit a loud
+  # marker if it ever fires — silent "unknown" was the failure mode
+  # the structural fix was meant to eliminate.
+  echo "───────────────────────────────────────────────────────────────"
+  echo "Boot integrity: INDETERMINATE — could not read summary from $INTEGRITY_CHECK"
+  echo "  (expected ok=true or ok=false; got $_integrity_ok)"
+  echo "  File exists? $([ -f "$INTEGRITY_CHECK" ] && echo yes || echo no)"
+  echo "  node present? $(check_cmd node && echo yes || echo no)"
   echo "───────────────────────────────────────────────────────────────"
   echo ""
 fi
@@ -332,17 +328,10 @@ fi
 # When (b) diverges from (c), the current session's MCP tools are
 # stale — a restart will pick up the populated env block.
 #
-# SessionStart hooks run in parallel. Without the wait below, we'd
-# sample env and settings.json mid-bootstrap and falsely report
-# degraded even when coo-bootstrap eventually completes cleanly (the
-# first user-visible regression after PR #20 landed: verification
-# run reported "degraded" despite OK-step=complete in the log).
-# Shared helper in lib/common.sh; exposes
-# VADE_BOOTSTRAP_WAIT_{SAW_FRESH,ELAPSED,TIMEOUT}.
-wait_for_coo_bootstrap 60
-_digest_saw_fresh="${VADE_BOOTSTRAP_WAIT_SAW_FRESH:-0}"
-_digest_wait_elapsed="${VADE_BOOTSTRAP_WAIT_ELAPSED:-0}"
-_digest_wait_timeout="${VADE_BOOTSTRAP_WAIT_TIMEOUT:-60}"
+# wait_for_coo_bootstrap removed: the digest now runs as an ordered
+# child of coo-bootstrap.sh (post-bootstrap-chain.sh), so bootstrap's
+# terminal log line and env are already in place by the time we read
+# them. No race, no timeout.
 
 echo ""
 echo "───────────────────────────────────────────────────────────────"
@@ -354,14 +343,6 @@ if [ -f "$BOOTSTRAP_LOG" ]; then
   [ -n "$last_line" ] && echo "  Last bootstrap: $last_line"
 else
   echo "  Last bootstrap: (no log at $BOOTSTRAP_LOG)"
-fi
-
-if [ "$_digest_saw_fresh" -eq 0 ]; then
-  if [ "$_digest_wait_elapsed" -ge "$_digest_wait_timeout" ]; then
-    echo "  WARN: timed out after ${_digest_wait_timeout}s waiting for a fresh bootstrap terminal state."
-  else
-    echo "  Note: no fresh bootstrap state this session (hook didn't fire, or finished before digest started)."
-  fi
 fi
 
 env_has_pat="no"; env_has_mail="no"; env_has_cf="no"
@@ -567,13 +548,13 @@ echo "                            Do NOT add GH_TOKEN=\$GITHUB_MCP_PAT — it de
 echo "                            shim. harness github MCP writes deny-listed (#112 S1)."
 echo "───────────────────────────────────────────────────────────────"
 
-# Note: integrity-check.sh runs from coo-bootstrap.sh's EXIT trap.
-# The TOP-of-digest wait (_wait_for_bootstrap_finalized) blocks until
-# that trap has fired for this session, so integrity-check.json is
-# current by the time any block in this script reads it. The previous
-# in-digest invocation (Phase A of coo-memory#762) raced coo-bootstrap
-# under SessionStart:startup parallelism and surfaced stale BOOT
-# DEGRADED banners on otherwise-green boots.
+# Note: integrity-check.sh (fast phase) runs from coo-bootstrap.sh's
+# EXIT trap before this script starts. The digest now executes as an
+# ordered child of bootstrap via post-bootstrap-chain.sh, so the JSON
+# is already written by the time any block here reads it. No wait,
+# no sentinel polling. The parallel-hook race surface that produced
+# false-positive BOOT DEGRADED banners (and the silent-unknown follow-on
+# from PR #445) is eliminated by construction.
 
 # Mem0 read/write surface — same banner pattern as "GitHub write surface"
 # above. Per coo-harness#109, the hosted Mem0 MCP at mcp.mem0.ai hits
