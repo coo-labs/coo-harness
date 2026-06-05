@@ -915,12 +915,6 @@ s_check_S9() {
   #   - **/ci/mocks/**              (CI op-mocks with synthetic responses)
   #   - **/_archive/**              (historical, not live)
   #   - comment lines (^[[:space:]]*#)   — doc/example refs are not bugs
-  # Item char class allows colon (e.g. "Service Account Auth Token:
-  # vade-coo"), period (date stamps), space (none today, but safe),
-  # underscore, hyphen, alnum. Field char class allows space (SSH keys
-  # use "private key" / "public key"), underscore, hyphen, alnum.
-  # `<`, `>`, `$`, `{`, `}`, `*`, backtick are excluded — those signal
-  # documentation placeholders, not real op-paths.
   local raw_lines found
   raw_lines="$(grep -rEhn 'op://COO/' "$scripts_root" \
     --include='*.sh' --include='*.py' \
@@ -928,12 +922,29 @@ s_check_S9() {
     --exclude-dir='mocks' --exclude-dir='_archive' \
     2>/dev/null)" || raw_lines=""
   # Strip the leading `<linenum>:` from each grep hit, drop comment
-  # lines, then extract op://COO/<item>/<field> tokens with the tight
-  # char classes. Sort+uniq for dedup.
+  # lines, then extract op://COO/<item>/<field> tokens. Sort+uniq dedup.
+  #
+  # Field-boundary discipline (the quoted/unquoted split below) closes a
+  # false-positive class. A 1P field may legitimately contain a space —
+  # the SSH items declare "private key" / "public key" — but such fields
+  # are ALWAYS quoted in the corpus, since an unquoted space would
+  # terminate the shell word. So two alternatives, longest-match:
+  #   1. Quoted    ['"]op://COO/<item>/<field with spaces>['"]
+  #      — field may contain spaces; the closing quote bounds the match.
+  #   2. Unquoted  op://COO/<item>/<field>
+  #      — field is [A-Za-z0-9_-]+, NO space. A trailing " 2>/dev/null"
+  #        or "|| echo failed" is the next shell token, not the field;
+  #        an earlier ( [word])? tail ate it and mis-reported
+  #        "<field> 2" / "<field> failed" as schema drift (the S9
+  #        false-positive class fixed here).
+  # Item char class allows colon ("Service Account Auth Token: vade-coo"),
+  # period (date stamps), space, underscore, hyphen, alnum. `<`,`>`,`$`,
+  # `{`,`}`,`*`,backtick stay excluded — documentation-placeholder shapes.
   found="$(printf '%s\n' "$raw_lines" \
     | sed -E 's/^[0-9]+://' \
     | awk '/^[[:space:]]*#/ { next } { print }' \
-    | grep -oE "op://COO/[A-Za-z0-9 _:.-]+/[A-Za-z0-9_-]+( [A-Za-z0-9_-]+)?" \
+    | grep -oE "['\"]op://COO/[A-Za-z0-9 _:.-]+/[A-Za-z0-9_ -]+['\"]|op://COO/[A-Za-z0-9 _:.-]+/[A-Za-z0-9_-]+" \
+    | sed -E "s/^['\"]//; s/['\"]$//" \
     | sed -E 's/[[:space:]]+$//' \
     | sort -u)" || found=""
 
