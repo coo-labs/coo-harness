@@ -12,10 +12,12 @@ name: COO on issue assign (reusable)
 # Workflow rationale: coo-labs/coo-memory:coo/operations/coo-on-assign.md
 #
 # COO_SCOPE_REPOS source: fetched at job time from the canonical registry
-# at coo-labs/.github/repos.yaml (status == "active" filter; meta tier
-# excluded). Adding/archiving a repo there auto-propagates to every
+# at coo-labs/.github/repos.yaml (status == "active" filter; all tiers
+# including meta). Adding/archiving a repo there auto-propagates to every
 # consumer thin trigger on next assignment event — no edit needed in
-# this file. F17b migration: coo-memory#999.
+# this file. F17b migration: coo-memory#999. Meta-tier `.github` is in
+# scope because coo-on-assign-reusable.yml itself reads repos.yaml from
+# there at job time, and the COO needs write access to keep it current.
 #
 # Trigger contract for callers:
 #   on: issues
@@ -56,13 +58,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Read coo-labs/.github/repos.yaml; emit active non-meta repos as
+          # Read coo-labs/.github/repos.yaml; emit all active repos as
           # a JSON array of fully-qualified slugs for github-script to consume.
           # `.github` is public so github.token can read it without elevated
           # perms. Failure here fails the job loudly (set -e) rather than
-          # silently falling back to a hardcoded list.
+          # silently falling back to a hardcoded list. Meta-tier (.github)
+          # is included so the COO can edit repos.yaml itself when needed.
           repos_json="$(gh api repos/coo-labs/.github/contents/repos.yaml --jq '.content | @base64d' \
-            | yq -r '.repos[] | select(.status == "active" and .tier != "meta") | "coo-labs/" + .name' \
+            | yq -r '.repos[] | select(.status == "active") | "coo-labs/" + .name' \
             | jq -R . | jq -s .)"
           if [ -z "$repos_json" ] || [ "$repos_json" = "[]" ]; then
             echo "::error::registry returned empty active-repo list; bailing rather than posting a launch URL with no repos pre-selected"
@@ -119,10 +122,10 @@ jobs:
 
             // --- Compose the pre-fill URL ---------------------------
             // URLSearchParams handles percent-encoding (incl. multi-line
-            // newlines as %0A) for both prompt and repositories. No
+            // newlines as %0A) for prompt, repositories, and model. No
             // `environment` param at MVP — Ven's last-used env is sticky.
             //
-            // Pre-select ALL ten coo-labs/* repos the COO has scope on.
+            // Pre-select ALL active coo-labs/* repos the COO has scope on.
             // The boot pass (coo-bootstrap.sh, integrity-check, identity
             // layer reads) cross-references files across these repos; a
             // session attached to only the assigning repo fails boot.
@@ -130,18 +133,30 @@ jobs:
             // in the form's repo selector.
             //
             // Loaded from the canonical registry at coo-labs/.github/repos.yaml
-            // in the prior step (filter: status == "active" and tier != "meta").
-            // Adding/archiving a repo there auto-propagates to every consumer
-            // thin trigger on next assignment event. F17b: coo-memory#999.
+            // in the prior step (filter: status == "active"; all tiers
+            // including meta). Adding/archiving a repo there auto-propagates
+            // to every consumer thin trigger on next assignment event.
+            // F17b: coo-memory#999.
             const COO_SCOPE_REPOS = JSON.parse(process.env.COO_SCOPE_REPOS_JSON);
             const repositories = [
               repoSlug,
               ...COO_SCOPE_REPOS.filter(r => r !== repoSlug),
             ].join(',');
 
+            // Pin Opus 4.7 (1M context) — the model the COO currently runs
+            // on. Without this, claude.ai/code defaults to whatever the
+            // signed-in user's account default is (currently Opus 4.8 on
+            // Max/Team/Enterprise). The `model` URL param is not in the
+            // documented pre-fill spec (which lists only prompt /
+            // prompt_url / repositories / environment) but URLSearchParams
+            // adds it harmlessly; if unsupported the session just falls
+            // back to account default. Verify on next assign event that
+            // the spawned session is actually on 4.7; if not, switch to
+            // an environment-level ANTHROPIC_MODEL setting.
             const params = new URLSearchParams({
               prompt,
               repositories,
+              model: 'claude-opus-4-7[1m]',
             });
             const launchUrl = `https://claude.ai/code?${params.toString()}`;
 
