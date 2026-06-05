@@ -68,7 +68,7 @@ jobs:
         uses: 1password/load-secrets-action@v2
         env:
           OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-          VADE_FIELDS_ADMIN_PAT: op://COO/vade-coo-self-2026-04/token
+          VADE_FIELDS_ADMIN_PAT: op://COO/github-pat-vade-coo/token
         with:
           export-env: true
 
