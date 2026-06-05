@@ -104,6 +104,21 @@ parse_push_refspec() {
   fi
 }
 
+# Resolve a PAT for the direct-URL fallback: prefer the named env var,
+# else read its canonical 1Password path. Post-Phase-2 (coo-memory#873)
+# neither PAT is exported into tool subshells, so the op-read is what keeps
+# this fallback alive — without it, a proxy-403 in a Monitor/Bash subshell
+# hits the no-PAT branch and the push silently fails to recover
+# (coo-harness#457). Single-shot, no retry. Prints the PAT, empty on miss.
+resolve_fallback_pat() {
+  local env_name="$1" op_path="$2" v
+  v="${!env_name:-}"
+  if [ -z "$v" ] && command -v op >/dev/null 2>&1; then
+    v="$(op read "$op_path" 2>/dev/null || true)"
+  fi
+  printf '%s' "$v"
+}
+
 PUSH_OUT_TMP=""
 cleanup() { [ -n "${PUSH_OUT_TMP:-}" ] && rm -f "$PUSH_OUT_TMP"; }
 trap cleanup EXIT
@@ -151,19 +166,27 @@ main() {
   # other remotes use the classic public-repo PAT when available.
   # Mirrors the gh-coo-wrap routing layer for symmetric coverage —
   # `git push` to a fork at venpopov/foo would otherwise fall back
-  # with the wrong PAT and re-403.
-  local fallback_pat fallback_pat_name fallback_user
-  if [ "$repo_owner" != "coo-labs" ] && [ -n "${GITHUB_PUBLIC_PAT:-}" ]; then
-    fallback_pat="$GITHUB_PUBLIC_PAT"
+  # with the wrong PAT and re-403. Each PAT is read from env first, then
+  # from its canonical op:// path (coo-harness#457) — post-Phase-2 the env
+  # vars are unset in tool subshells, so without the op-read this fallback
+  # never fires.
+  local fallback_pat fallback_pat_name fallback_user="vade-coo"
+  if [ "$repo_owner" != "coo-labs" ]; then
     fallback_pat_name="GITHUB_PUBLIC_PAT"
-    fallback_user="vade-coo"
-  elif [ -n "${GITHUB_MCP_PAT:-}" ]; then
-    fallback_pat="$GITHUB_MCP_PAT"
-    fallback_pat_name="GITHUB_MCP_PAT"
-    fallback_user="vade-coo"
+    fallback_pat="$(resolve_fallback_pat GITHUB_PUBLIC_PAT op://COO/github-pat-classic-public/credential)"
+    if [ -z "$fallback_pat" ]; then
+      # Last resort: the coo-labs MCP PAT (likely re-403s on a non-coo-labs
+      # remote, but preserves the original public->MCP fallthrough).
+      fallback_pat_name="GITHUB_MCP_PAT"
+      fallback_pat="$(resolve_fallback_pat GITHUB_MCP_PAT op://COO/github-pat-vade-coo/token)"
+    fi
   else
-    log_err "git proxy push failed but no GitHub PAT is set (GITHUB_MCP_PAT, GITHUB_PUBLIC_PAT); cannot fall back"
-    log_err "  run scripts/boot/coo-bootstrap.sh to populate them (Phase 2: no coo-env file)"
+    fallback_pat_name="GITHUB_MCP_PAT"
+    fallback_pat="$(resolve_fallback_pat GITHUB_MCP_PAT op://COO/github-pat-vade-coo/token)"
+  fi
+  if [ -z "$fallback_pat" ]; then
+    log_err "git proxy push failed but no GitHub PAT available — env (GITHUB_MCP_PAT/GITHUB_PUBLIC_PAT) unset and op-read fallback failed; cannot fall back"
+    log_err "  check 'op whoami' / run scripts/boot/coo-bootstrap.sh"
     return "$rc"
   fi
 
