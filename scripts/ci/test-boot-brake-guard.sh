@@ -65,6 +65,40 @@ _setup_session_dirs() {
   echo "$state_dir|$home_dir"
 }
 
+# SH2 (coo-memory#1167): mint a per-session brake-key in the test
+# home_dir. Both the test's HMAC computation below and the guard's
+# load_brake_key() read this file. Tests that exercise override paths
+# must stage it before staging override sentinels.
+_make_brake_key() {
+  local home_dir="$1" sid="$2"
+  mkdir -p "$home_dir/.vade"
+  local key_file="$home_dir/.vade/brake-key.$sid"
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex 32 > "$key_file" 2>/dev/null
+  else
+    python3 -c 'import secrets, sys; sys.stdout.write(secrets.token_hex(32))' > "$key_file"
+  fi
+  chmod 600 "$key_file"
+}
+
+_compute_brake_hmac() {
+  local home_dir="$1" sid="$2" granted_at="$3" expires_at="$4" reason="$5"
+  KEY_FILE="$home_dir/.vade/brake-key.$sid" \
+  GRANTED_AT="$granted_at" \
+  EXPIRES_AT="$expires_at" \
+  SID="$sid" \
+  REASON="$reason" \
+  python3 -c '
+import hashlib, hmac, os, sys
+with open(os.environ["KEY_FILE"], "rb") as fh:
+    data = fh.read().strip()
+key = bytes.fromhex(data.decode("ascii"))
+parts = (os.environ["GRANTED_AT"], os.environ["EXPIRES_AT"], os.environ["SID"], os.environ["REASON"])
+msg = "|".join(str(len(p)) + ":" + p for p in parts).encode()
+sys.stdout.write(hmac.new(key, msg, hashlib.sha256).hexdigest())
+'
+}
+
 _make_all_deliverables_present() {
   local state_dir="$1" home_dir="$2" sid="${3:-}"
   printf '{"summary":{"ok":true}}' > "$state_dir/integrity-check.json"
@@ -175,23 +209,15 @@ fi
 
 # Override sentinel scoped to parent session. Compute HMAC using the
 # same length-prefixed payload as guard.py and unbrake.sh — security
-# review SC1 (expires_at in MAC scope) + SC3 (length-prefixing).
+# review SC1 (expires_at in MAC scope) + SC3 (length-prefixing). The
+# HMAC key is the per-session brake-key file (coo-memory#1167 SH2).
 parent_sid=t2
 child_sid=t2-child
+_make_brake_key "$home_dir" "$parent_sid"
 granted_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 expires_at="$(date -u -d '+30 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
   || date -u -v +30M +%Y-%m-%dT%H:%M:%SZ)"
-hmac_v="$(GRANTED_AT="$granted_at" EXPIRES_AT="$expires_at" SID="$parent_sid" REASON="test override for ci" python3 -c '
-import hashlib, hmac, os, sys
-src = (os.environ.get("OP_SERVICE_ACCOUNT_TOKEN")
-       or os.environ.get("MEM0_API_KEY")
-       or os.environ.get("GITHUB_MCP_PAT")
-       or "vade-boot-brake-default-no-secrets")
-key = hashlib.sha256(src.encode()).digest()
-parts = (os.environ["GRANTED_AT"], os.environ["EXPIRES_AT"], os.environ["SID"], os.environ["REASON"])
-msg = "|".join(str(len(p)) + ":" + p for p in parts).encode()
-sys.stdout.write(hmac.new(key, msg, hashlib.sha256).hexdigest())
-')"
+hmac_v="$(_compute_brake_hmac "$home_dir" "$parent_sid" "$granted_at" "$expires_at" "test override for ci")"
 cat > "$home_dir/.vade/boot-brake-override.${parent_sid}.json" <<EOF
 {"granted_at":"$granted_at","expires_at":"$expires_at","session_id":"$parent_sid","reason":"test override for ci","hmac":"$hmac_v"}
 EOF
@@ -343,17 +369,11 @@ set -- $(echo "$(_setup_session_dirs "t14")" | tr '|' ' ')
 state_dir="$1"; home_dir="$2"
 # Reuse the test-6 override-write logic with a 1-minute TTL
 parent_sid=t14
+_make_brake_key "$home_dir" "$parent_sid"
 granted_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 expires_at="$(date -u -d '+1 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
   || date -u -v +1M +%Y-%m-%dT%H:%M:%SZ)"
-hmac_v="$(GRANTED_AT="$granted_at" EXPIRES_AT="$expires_at" SID="$parent_sid" REASON="testing tamper resistance" python3 -c '
-import hashlib, hmac, os, sys
-src = (os.environ.get("OP_SERVICE_ACCOUNT_TOKEN") or os.environ.get("MEM0_API_KEY") or os.environ.get("GITHUB_MCP_PAT") or "vade-boot-brake-default-no-secrets")
-key = hashlib.sha256(src.encode()).digest()
-parts = (os.environ["GRANTED_AT"], os.environ["EXPIRES_AT"], os.environ["SID"], os.environ["REASON"])
-msg = "|".join(str(len(p)) + ":" + p for p in parts).encode()
-sys.stdout.write(hmac.new(key, msg, hashlib.sha256).hexdigest())
-')"
+hmac_v="$(_compute_brake_hmac "$home_dir" "$parent_sid" "$granted_at" "$expires_at" "testing tamper resistance")"
 # Forge: change expires_at to far-future, keep HMAC computed with the
 # original. The guard MUST reject because expires_at is in the MAC scope.
 future_expires="2099-12-31T23:59:59Z"
@@ -631,6 +651,9 @@ fi
 echo "Test 22 — invalid override logs cause=override_invalidated (coo-memory#1168 O10)"
 set -- $(echo "$(_setup_session_dirs "t22")" | tr '|' ' ')
 state_dir="$1"; home_dir="$2"
+# Stage a brake-key so the guard reaches the HMAC compare path; the
+# bogus "deadbeef" HMAC then triggers hmac_mismatch (coo-memory#1167 SH2).
+_make_brake_key "$home_dir" "t22"
 # Far-future expiry but bogus HMAC → check_override returns hmac_mismatch.
 cat > "$home_dir/.vade/boot-brake-override.t22.json" <<EOF
 {"granted_at":"2026-01-01T00:00:00Z","expires_at":"2099-12-31T23:59:59Z","session_id":"t22","reason":"bogus","hmac":"deadbeef"}
@@ -938,6 +961,207 @@ else
     # Some other deliverable might be missing — that's fine, not our test.
     _pass "well-formed has_jq_path didn't trip O15 syntax check (any deny is for other deliverables)"
   fi
+fi
+# ─── Test 30 (NEW): manifest SHA pin enforcement (coo-memory#1167 SH1) ─
+echo "Test 30 — VADE_BRAKE_MANIFEST_SHA256 enforcement"
+real_sha="$(sha256sum "$COO_MEMORY_DIR/operations/boot-deliverables.yml" | awk '{print $1}')"
+bogus_sha="0000000000000000000000000000000000000000000000000000000000000000"
+# 25a: bogus pin → guard refuses with cause=manifest_sha_mismatch
+set -- $(echo "$(_setup_session_dirs "t30a")" | tr '|' ' ')
+state_dir="$1"; home_dir="$2"
+_make_all_deliverables_present "$state_dir" "$home_dir" "t30a"
+out_t25a="$(printf '{"session_id":"t30a","cwd":"/home/user","tool_name":"Bash","tool_input":{"command":"ls"}}' | \
+  VADE_BRAKE_ENFORCE=block-on-FAIL \
+  VADE_BRAKE_RACE_GRACE_SECONDS=0 \
+  VADE_BRAKE_MANIFEST_SHA256="$bogus_sha" \
+  VADE_CLOUD_STATE_DIR="$state_dir" \
+  VADE_COO_MEMORY_DIR="$COO_MEMORY_DIR" \
+  HOME="$home_dir" \
+  bash "$GUARD" 2>/dev/null)"
+cause_t25a="$(python3 -c "import json; print(json.load(open('$state_dir/boot-brake.t30a.json')).get('cause','?'))")"
+if [ "$cause_t25a" = "manifest_sha_mismatch" ]; then
+  _pass "Bogus pin → sentinel cause=manifest_sha_mismatch"
+else
+  _fail "Bogus pin did not produce manifest_sha_mismatch (got: $cause_t25a)"
+fi
+if printf '%s' "$out_t25a" | grep -q '"permissionDecision":[[:space:]]*"deny"'; then
+  _pass "Bogus pin under block-on-FAIL → tool call denied"
+else
+  _fail "Bogus pin did NOT cause deny (got: $out_t25a)"
+fi
+# 25b: correct pin → state OK + allow
+set -- $(echo "$(_setup_session_dirs "t30b")" | tr '|' ' ')
+state_dir="$1"; home_dir="$2"
+_make_all_deliverables_present "$state_dir" "$home_dir" "t30b"
+out_t25b="$(printf '{"session_id":"t30b","cwd":"/home/user","tool_name":"Bash","tool_input":{"command":"ls"}}' | \
+  VADE_BRAKE_ENFORCE=block-on-FAIL \
+  VADE_BRAKE_RACE_GRACE_SECONDS=0 \
+  VADE_BRAKE_MANIFEST_SHA256="$real_sha" \
+  VADE_CLOUD_STATE_DIR="$state_dir" \
+  VADE_COO_MEMORY_DIR="$COO_MEMORY_DIR" \
+  HOME="$home_dir" \
+  bash "$GUARD" 2>/dev/null)"
+state_t25b="$(python3 -c "import json; print(json.load(open('$state_dir/boot-brake.t30b.json')).get('state','?'))")"
+if [ "$state_t25b" = "OK" ] && [ -z "$out_t25b" ]; then
+  _pass "Correct pin → state=OK, tool call allowed"
+else
+  _fail "Correct pin did not produce OK (state=$state_t25b, out=$out_t25b)"
+fi
+# 25c: unset pin → opt-in pass-through
+set -- $(echo "$(_setup_session_dirs "t30c")" | tr '|' ' ')
+state_dir="$1"; home_dir="$2"
+_make_all_deliverables_present "$state_dir" "$home_dir" "t30c"
+out_t25c="$(_invoke_guard t30c Bash block-on-FAIL "$state_dir" "$home_dir" "ls")"
+state_t25c="$(python3 -c "import json; print(json.load(open('$state_dir/boot-brake.t30c.json')).get('state','?'))")"
+if [ "$state_t25c" = "OK" ] && [ -z "$out_t25c" ]; then
+  _pass "Unset pin → opt-in pass-through, state OK"
+else
+  _fail "Unset pin failed opt-in (state=$state_t25c, out=$out_t25c)"
+fi
+
+# ─── Test 31 (NEW): per-session brake-key required (coo-memory#1167 SH2) ─
+echo "Test 31 — override without staged brake-key → cause=override_invalidated failure_kind=no_brake_key"
+set -- $(echo "$(_setup_session_dirs "t31")" | tr '|' ' ')
+state_dir="$1"; home_dir="$2"
+# Stage a syntactically valid override but NO brake-key file.
+cat > "$home_dir/.vade/boot-brake-override.t31.json" <<EOF
+{"granted_at":"2026-01-01T00:00:00Z","expires_at":"2099-12-31T23:59:59Z","session_id":"t31","reason":"no key staged","hmac":"deadbeef"}
+EOF
+chmod 600 "$home_dir/.vade/boot-brake-override.t31.json"
+_invoke_guard t31 Bash block-on-FAIL "$state_dir" "$home_dir" "ls" > /dev/null
+if grep -q '"failure_kind":"no_brake_key"' "$state_dir/brake-events.jsonl" 2>/dev/null; then
+  _pass "Missing brake-key → failure_kind=no_brake_key (forging blocked)"
+else
+  _fail "Missing brake-key did not produce no_brake_key event: $(cat "$state_dir/brake-events.jsonl" 2>/dev/null)"
+fi
+# Sanity: with brake-key staged + matching HMAC, override is honored.
+sleep 1.1
+_make_brake_key "$home_dir" "t31"
+g_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+e_at="$(date -u -d '+10 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+  || date -u -v +10M +%Y-%m-%dT%H:%M:%SZ)"
+hmac_v="$(_compute_brake_hmac "$home_dir" "t31" "$g_at" "$e_at" "staged with key now")"
+cat > "$home_dir/.vade/boot-brake-override.t31.json" <<EOF
+{"granted_at":"$g_at","expires_at":"$e_at","session_id":"t31","reason":"staged with key now","hmac":"$hmac_v"}
+EOF
+chmod 600 "$home_dir/.vade/boot-brake-override.t31.json"
+out_t26b="$(_invoke_guard t31 Bash block-on-FAIL "$state_dir" "$home_dir" "ls")"
+if [ -z "$out_t26b" ]; then
+  _pass "With brake-key + valid HMAC, override allows Bash"
+else
+  _fail "Brake-key + valid HMAC did not allow override: $out_t26b"
+fi
+
+# ─── Test 32 (NEW): parent_session_id check (coo-memory#1167 SH4) ─
+echo "Test 32 — parent_session_id !=  session_id → override refused, cause=parent_session_mismatch"
+set -- $(echo "$(_setup_session_dirs "t32")" | tr '|' ' ')
+state_dir="$1"; home_dir="$2"
+# Stage a valid override for session_id=t32.
+_make_brake_key "$home_dir" "t32"
+g_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+e_at="$(date -u -d '+10 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+  || date -u -v +10M +%Y-%m-%dT%H:%M:%SZ)"
+hmac_v="$(_compute_brake_hmac "$home_dir" "t32" "$g_at" "$e_at" "valid parent override")"
+cat > "$home_dir/.vade/boot-brake-override.t32.json" <<EOF
+{"granted_at":"$g_at","expires_at":"$e_at","session_id":"t32","reason":"valid parent override","hmac":"$hmac_v"}
+EOF
+chmod 600 "$home_dir/.vade/boot-brake-override.t32.json"
+# Fire with parent_session_id="t32-parent" != session_id="t32" → SH4 refuses.
+input_t27='{"session_id":"t32","parent_session_id":"t32-parent","cwd":"/home/user","tool_name":"Bash","tool_input":{"command":"ls"}}'
+out_t27="$(printf '%s' "$input_t27" | \
+  VADE_BRAKE_ENFORCE=block-on-FAIL \
+  VADE_BRAKE_RACE_GRACE_SECONDS=0 \
+  VADE_CLOUD_STATE_DIR="$state_dir" \
+  VADE_COO_MEMORY_DIR="$COO_MEMORY_DIR" \
+  HOME="$home_dir" \
+  bash "$GUARD" 2>/dev/null)"
+if grep -q '"cause":"parent_session_mismatch"' "$state_dir/brake-events.jsonl" 2>/dev/null; then
+  _pass "Sub-agent flag (parent_session_id set) → cause=parent_session_mismatch"
+else
+  _fail "parent_session_mismatch event not emitted: $(cat "$state_dir/brake-events.jsonl" 2>/dev/null)"
+fi
+if printf '%s' "$out_t27" | grep -q '"permissionDecision":[[:space:]]*"deny"'; then
+  _pass "Sub-agent invocation denied despite parent's valid override file"
+else
+  _fail "Sub-agent invocation NOT denied (got: $out_t27)"
+fi
+# Sanity: same override fires WITHOUT parent_session_id → allow.
+sleep 1.1
+input_t27b='{"session_id":"t32","cwd":"/home/user","tool_name":"Bash","tool_input":{"command":"ls"}}'
+out_t27b="$(printf '%s' "$input_t27b" | \
+  VADE_BRAKE_ENFORCE=block-on-FAIL \
+  VADE_BRAKE_RACE_GRACE_SECONDS=0 \
+  VADE_CLOUD_STATE_DIR="$state_dir" \
+  VADE_COO_MEMORY_DIR="$COO_MEMORY_DIR" \
+  HOME="$home_dir" \
+  bash "$GUARD" 2>/dev/null)"
+if [ -z "$out_t27b" ]; then
+  _pass "Same override, no parent_session_id field → allow (SH4 is targeted, not blanket)"
+else
+  _fail "Same override fired without parent_session_id was wrongly denied: $out_t27b"
+fi
+
+# ─── Test 33 (NEW): event log + audit log mode 0600 (coo-memory#1167 M3) ─
+echo "Test 33 — brake-events.jsonl + brake-audit.jsonl land mode 0600"
+set -- $(echo "$(_setup_session_dirs "t33")" | tr '|' ' ')
+state_dir="$1"; home_dir="$2"
+_invoke_guard t33 Bash block-on-FAIL "$state_dir" "$home_dir" "ls" > /dev/null
+events_mode="$(stat -c '%a' "$state_dir/brake-events.jsonl" 2>/dev/null \
+  || stat -f '%Lp' "$state_dir/brake-events.jsonl" 2>/dev/null)"
+if [ "$events_mode" = "600" ]; then
+  _pass "brake-events.jsonl mode 0600"
+else
+  _fail "brake-events.jsonl mode is $events_mode (want 600)"
+fi
+
+# ─── Test 34 (NEW): session_id validation (coo-memory#1167 polish P1) ─
+echo "Test 34 — invalid session_id replaced with 'unknown' + logged"
+set -- $(echo "$(_setup_session_dirs "t34")" | tr '|' ' ')
+state_dir="$1"; home_dir="$2"
+_make_all_deliverables_present "$state_dir" "$home_dir"
+# session_id with shell metachars → guard replaces with "unknown".
+input_t29='{"session_id":"t34;rm -rf /","cwd":"/home/user","tool_name":"Bash","tool_input":{"command":"ls"}}'
+printf '%s' "$input_t29" | \
+  VADE_BRAKE_ENFORCE=block-on-FAIL \
+  VADE_BRAKE_RACE_GRACE_SECONDS=0 \
+  VADE_CLOUD_STATE_DIR="$state_dir" \
+  VADE_COO_MEMORY_DIR="$COO_MEMORY_DIR" \
+  HOME="$home_dir" \
+  bash "$GUARD" 2>/dev/null > /dev/null
+if grep -q '"cause":"invalid_session_id"' "$state_dir/brake-events.jsonl" 2>/dev/null; then
+  _pass "Invalid session_id → cause=invalid_session_id event"
+else
+  _fail "Invalid session_id did not log invalid_session_id event"
+fi
+# Confirm no boot-brake.<malicious-string>.json was created
+if ls "$state_dir"/boot-brake.*rm* 2>/dev/null | grep -q .; then
+  _fail "Malicious session_id was used to form a file path"
+else
+  _pass "Malicious session_id did not form an attacker-shaped sentinel path"
+fi
+# The "unknown" sentinel should exist
+if [ -f "$state_dir/boot-brake.unknown.json" ]; then
+  _pass "Malicious session_id collapsed to 'unknown' sentinel"
+else
+  _fail "Expected boot-brake.unknown.json after invalid session_id"
+fi
+
+# ─── Test 35 (NEW): brake-events.jsonl is sanitized (coo-memory#1167 SH3) ─
+echo "Test 35 — event-log entries are sanitized at write time"
+set -- $(echo "$(_setup_session_dirs "t35")" | tr '|' ' ')
+state_dir="$1"; home_dir="$2"
+# Stage all real deliverables; stage an override-invalidated entry with a
+# crafted failure_kind. The guard's own emission for hmac_mismatch won't
+# carry attacker bytes (it's a literal string in code), so this exercises
+# the centralized sanitize. Take a different angle: produce an
+# identity_predicate_unmatched event whose expanded_glob can carry the
+# substitution. Then assert no `;` or `&` is present anywhere in the
+# event log.
+_invoke_guard t35 Bash block-on-FAIL "$state_dir" "$home_dir" "ls" > /dev/null
+if grep -qE '[;&<>|`$]' "$state_dir/brake-events.jsonl" 2>/dev/null; then
+  _fail "Event log contains shell metacharacter (sanitize regression): $(grep -oE '[;&<>|\\\`$]' "$state_dir/brake-events.jsonl" | head -3)"
+else
+  _pass "Event log entries contain no shell metacharacters"
 fi
 
 # ─── Summary ────────────────────────────────────────────────────

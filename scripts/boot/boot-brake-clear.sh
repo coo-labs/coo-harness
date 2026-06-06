@@ -52,6 +52,32 @@ EOF
 chmod 600 "$tmp" 2>/dev/null || true
 mv -f "$tmp" "$sentinel" 2>/dev/null || rm -f "$tmp"
 
+# SH2 (coo-memory#1167): mint per-session brake-key. 32 random bytes
+# hex-encoded into $HOME/.vade/brake-key.<sid> mode 0600. Replaces the
+# prior HMAC derivation that reused OP_SERVICE_ACCOUNT_TOKEN — that
+# widened the SA-token exposure surface to anything that can Read
+# /proc/self/environ and let any holder forge overrides. Per-session
+# keying scopes forgery resistance to the file system, where
+# read-boot-inlined-guard.sh denies Read on brake-key.* paths.
+mkdir -p "$HOME/.vade" 2>/dev/null || true
+key_file="$HOME/.vade/brake-key.${session_id}"
+if [ ! -s "$key_file" ]; then
+  key_tmp="$key_file.tmp.$$"
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex 32 > "$key_tmp" 2>/dev/null || true
+  elif command -v xxd >/dev/null 2>&1 && [ -r /dev/urandom ]; then
+    head -c 32 /dev/urandom | xxd -p -c 100 > "$key_tmp" 2>/dev/null || true
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import secrets, sys; sys.stdout.write(secrets.token_hex(32))' > "$key_tmp" 2>/dev/null || true
+  fi
+  if [ -s "$key_tmp" ]; then
+    chmod 600 "$key_tmp" 2>/dev/null || true
+    mv -f "$key_tmp" "$key_file" 2>/dev/null || rm -f "$key_tmp"
+  else
+    rm -f "$key_tmp" 2>/dev/null || true
+  fi
+fi
+
 # Stale-sentinel sweep: remove sentinels older than 24h whose session_id
 # is not this one. Bounded; never deletes the live session's state.
 find "$VADE_CLOUD_STATE_DIR" -maxdepth 1 -name "boot-brake.*.json" -mmin +1440 2>/dev/null \
@@ -77,6 +103,15 @@ find "$HOME/.vade" -maxdepth 1 -name "boot-brake-override.*.json" 2>/dev/null \
 # Old session-reads logs sweep (older than 24h)
 find "$HOME/.vade" -maxdepth 1 -name "session-reads.*.log" -mmin +1440 2>/dev/null \
   -exec rm -f {} \; 2>/dev/null || true
+
+# Old brake-keys sweep (older than 24h, never this session's). SH2.
+find "$HOME/.vade" -maxdepth 1 -name "brake-key.*" -mmin +1440 2>/dev/null \
+  | while IFS= read -r path; do
+      case "$(basename "$path")" in
+        "brake-key.${session_id}") continue ;;
+      esac
+      rm -f "$path" 2>/dev/null || true
+    done
 
 # Aged-out validator-self-fault diagnostics (coo-memory#1168 O8). A
 # misconfigured manifest faults on every PreToolUse — without a sweep,
