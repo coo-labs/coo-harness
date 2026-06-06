@@ -9,10 +9,10 @@ list-r2-transcripts.py — coo-memory#499.
 Print R2 transcript keys under a given prefix, one per line (text mode)
 or as a JSON array of {key, size, last_modified} (--json mode).
 
-Reads R2 credentials and bucket coordinates from 1Password
-(`op read op://COO/r2-transcripts/{endpoint,bucket}`) and the env vars
-`R2_TRANSCRIPTS_ACCESS_KEY_ID` / `R2_TRANSCRIPTS_SECRET_ACCESS_KEY`,
-matching `transcript-meta-backfill.py`'s helper functions.
+R2 credential plumbing comes from `lib/transcripts/r2.py` (consolidated
+per coo-labs/coo-memory#1147 / coo-labs/coo-harness#531). The lib's
+`list_keys` primitive owns the paginated list_objects_v2 walk; this
+script is a thin CLI wrapper around it.
 
 Why a separate script: the nightly task previously inlined the R2
 enumeration as a `python3 - <<PY` heredoc with a bare `import boto3`,
@@ -30,80 +30,17 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-import shutil
-import subprocess
 import sys
+from pathlib import Path
 
+# Locate coo-harness/lib/ on sys.path so `from transcripts import ...` resolves
+# under the uv-run venv this script spawns into. See lib/transcripts/README.md
+# §"Importing" for the parents[N] table; this script lives at
+# scripts/lib/<top>.py so parents[2] is the repo root.
+SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPT_DIR.parent.parent / "lib"))
 
-def _op_read(ref: str) -> str:
-    if not shutil.which("op"):
-        return ""
-    try:
-        out = subprocess.run(
-            ["op", "read", ref],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        return out.stdout.strip()
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        return ""
-
-
-def _r2_creds() -> tuple[str, str, str, str]:
-    access_key = os.environ.get("R2_TRANSCRIPTS_ACCESS_KEY_ID", "").strip()
-    secret_key = os.environ.get("R2_TRANSCRIPTS_SECRET_ACCESS_KEY", "").strip()
-    if not access_key or not secret_key:
-        raise RuntimeError(
-            "R2_TRANSCRIPTS_ACCESS_KEY_ID / R2_TRANSCRIPTS_SECRET_ACCESS_KEY "
-            "missing — ensure the bash wrapper ran its op-read resolver "
-            "(Phase 2 post-coo-memory#873) or set both vars explicitly"
-        )
-    endpoint = _op_read("op://COO/r2-transcripts/endpoint")
-    bucket = _op_read("op://COO/r2-transcripts/bucket")
-    if not endpoint or not bucket:
-        raise RuntimeError(
-            "op://COO/r2-transcripts/{endpoint,bucket} unreadable — "
-            "verify OP_SERVICE_ACCOUNT_TOKEN and 1Password provisioning"
-        )
-    return access_key, secret_key, endpoint, bucket
-
-
-def _r2_client(access_key: str, secret_key: str, endpoint: str):
-    import boto3
-    from botocore.config import Config
-
-    return boto3.client(
-        "s3",
-        endpoint_url=endpoint,
-        aws_access_key_id=access_key,
-        aws_secret_access_key=secret_key,
-        region_name="auto",
-        config=Config(
-            signature_version="s3v4",
-            retries={"max_attempts": 3, "mode": "standard"},
-        ),
-    )
-
-
-def list_keys(prefix: str) -> list[dict]:
-    access_key, secret_key, endpoint, bucket = _r2_creds()
-    s3 = _r2_client(access_key, secret_key, endpoint)
-    out: list[dict] = []
-    for page in s3.get_paginator("list_objects_v2").paginate(
-        Bucket=bucket, Prefix=prefix
-    ):
-        for obj in page.get("Contents", []):
-            out.append(
-                {
-                    "key": obj["Key"],
-                    "size": obj["Size"],
-                    "last_modified": obj["LastModified"].isoformat(),
-                }
-            )
-    return out
+from transcripts import list_keys  # noqa: E402
 
 
 def main() -> int:

@@ -56,6 +56,15 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+# Locate coo-harness/lib/ on sys.path so `from transcripts import ...` resolves
+# under the uv-run venv this script spawns into. See lib/transcripts/README.md
+# §"Importing" for the parents[N] table; this script lives at
+# scripts/boot/<top>.py so parents[2] is the repo root.
+SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPT_DIR.parent.parent / "lib"))
+
+from transcripts import R2Error, r2_client, r2_coordinates  # noqa: E402
+
 # Pre-#216 orphan session_ids (substring-matched against keys). These
 # predate the embedding code and cannot self-heal; the cutoff +
 # allowlist combination ensures they never trip the detector.
@@ -77,49 +86,6 @@ def _emit(payload: dict) -> None:
 
 def _parse_iso(s: str) -> datetime:
     return datetime.fromisoformat(s.replace("Z", "+00:00"))
-
-
-def _op_read(ref: str) -> str:
-    """Read a 1Password ref via `op` CLI; return empty string on miss.
-
-    Mirror of transcript-fetch.py / transcript-meta-backfill.py — the
-    R2 endpoint and bucket are stored in 1Password rather than env
-    so they can rotate without a settings.json patch.
-    """
-    import shutil
-    import subprocess
-
-    if not shutil.which("op"):
-        return ""
-    try:
-        out = subprocess.run(
-            ["op", "read", ref],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        return out.stdout.strip()
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        return ""
-
-
-def _r2_client(endpoint: str, access: str, secret: str):
-    """Build an R2 boto3 client. Mirror of transcript-fetch.py."""
-    import boto3
-    from botocore.config import Config
-
-    return boto3.client(
-        "s3",
-        endpoint_url=endpoint,
-        aws_access_key_id=access,
-        aws_secret_access_key=secret,
-        region_name="auto",
-        config=Config(
-            signature_version="s3v4",
-            retries={"max_attempts": 2, "mode": "standard"},
-        ),
-    )
 
 
 def _date_prefixes(now: datetime) -> list[str]:
@@ -157,28 +123,15 @@ def main() -> int:
     ap.add_argument("--verbose", action="store_true", help="Per-row detail to stderr.")
     args = ap.parse_args()
 
-    access = os.environ.get("R2_TRANSCRIPTS_ACCESS_KEY_ID", "").strip()
-    secret = os.environ.get("R2_TRANSCRIPTS_SECRET_ACCESS_KEY", "").strip()
-    if not access or not secret:
+    try:
+        coords = r2_coordinates()
+    except R2Error as e:
         _emit(
             {
                 "ok": True,
                 "orphan_count": 0,
                 "checked_count": 0,
-                "detail": "skip: R2_TRANSCRIPTS_{ACCESS,SECRET}_KEY missing",
-            }
-        )
-        return 0
-
-    endpoint = _op_read("op://COO/r2-transcripts/endpoint")
-    bucket = _op_read("op://COO/r2-transcripts/bucket")
-    if not endpoint or not bucket:
-        _emit(
-            {
-                "ok": True,
-                "orphan_count": 0,
-                "checked_count": 0,
-                "detail": "skip: op://COO/r2-transcripts/{endpoint,bucket} not readable",
+                "detail": f"skip: {e}",
             }
         )
         return 0
@@ -210,7 +163,8 @@ def main() -> int:
         )
         return 0
 
-    s3 = _r2_client(endpoint, access, secret)
+    s3 = r2_client(coords)
+    bucket = coords.bucket
     now = datetime.now(timezone.utc)
     window_start = now - timedelta(hours=args.window_h)
     prefixes = _date_prefixes(now)
