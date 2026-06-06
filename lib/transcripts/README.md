@@ -16,6 +16,8 @@ and the principal-engineer / SRE review chain it cites.
 | `r2.py` | boto3 client, 1Password credential plumbing, sidecar GET/PUT |
 | `schema.py` | Pydantic v2 `Sidecar` (schema v3), `UrlSource` enum, `PARSER_VERSION` |
 | `provenance.py` | `AUTHORITATIVE_URL_SOURCES`, `RECONCILE_ELIGIBLE_URL_SOURCES`, `is_authoritative()` |
+| `jsonl.py` | local jsonl parsing + classification |
+| `state.py` | R2 cohort snapshot, reconciliation invariant, drift detector |
 | `__init__.py` | Public API re-exports |
 | `py.typed` | PEP 561 marker — package ships type information |
 
