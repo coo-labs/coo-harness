@@ -204,6 +204,44 @@ def _is_no_such_key(e: BaseException) -> bool:
 
 SIDECAR_CACHE_CONTROL = "private, max-age=0, must-revalidate"
 SIDECAR_CONTENT_TYPE = "application/json; charset=utf-8"
+HTML_CONTENT_TYPE = "text/html; charset=utf-8"
+
+
+def write_html_object(
+    session_id: str,
+    html_bytes: bytes,
+    *,
+    key_prefix: str = "rendered",
+    overwrite: bool = False,
+    s3: S3Client | None = None,
+) -> bool:
+    """Upload rendered HTML to R2 at <key_prefix>/<sid>.html.
+
+    Sibling of write_sidecar — same cede semantics, same atomic-create
+    discipline (IfNoneMatch="*" when overwrite=False), same cache-control
+    headers. Used by the events-API backfill driver and (Phase 1 port) by
+    the existing render-backfill script.
+    """
+    if s3 is None:
+        s3 = r2_client()
+    bucket = _bucket_from_env_or_op()
+    key = f"{key_prefix}/{session_id}.html"
+    put_kwargs: dict[str, Any] = {
+        "Bucket": bucket,
+        "Key": key,
+        "Body": html_bytes,
+        "ContentType": HTML_CONTENT_TYPE,
+        "CacheControl": SIDECAR_CACHE_CONTROL,
+    }
+    if not overwrite:
+        put_kwargs["IfNoneMatch"] = "*"
+    try:
+        s3.put_object(**put_kwargs)
+    except Exception as e:
+        if not overwrite and _is_precondition_failed(e):
+            return False
+        raise
+    return True
 
 
 def write_sidecar(
