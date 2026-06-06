@@ -21,6 +21,51 @@ HOOK="$SCRIPT_DIR/../hooks/preuse-agent-env-scrub.sh"
 command -v jq >/dev/null || { echo "FAIL: jq required"; exit 1; }
 command -v python3 >/dev/null || { echo "FAIL: python3 required"; exit 1; }
 
+# Stage a minimal coo-memory fixture so the hook's schema reader resolves
+# to a real file. Without this, the hook can't classify GITHUB_MCP_PAT as
+# a secret var and §2 (enforce-mode-blocks) silently allows. The dev
+# container's /home/user/coo-memory hides this in local runs; the CI
+# runner exposes it. §6 (missing-schema fail-open) explicitly overrides
+# VADE_COO_MEMORY_DIR to a nonexistent path.
+FIXTURE_DIR="$(mktemp -d -t env-scrub-fixture.XXXXXX)"
+trap 'rm -rf "$FIXTURE_DIR"' EXIT
+mkdir -p "$FIXTURE_DIR/operations/secrets"
+cat > "$FIXTURE_DIR/operations/secrets/schema.yaml" <<'SCHEMA_EOF'
+schema_version: 1
+vault: COO
+credentials:
+  - id: github-pat-vade-coo
+    op_item: vade-coo-self-2026-04
+    op_field: token
+    status: active
+    rotation_class: III
+    env_aliases:
+      - GITHUB_MCP_PAT
+      - GITHUB_TOKEN
+  - id: mem0-api
+    op_item: mem0-vade-coo
+    op_field: credential
+    status: active
+    rotation_class: III
+    env_aliases:
+      - MEM0_API_KEY
+  - id: op-sa-token
+    op_item: service-account
+    op_field: token
+    status: active
+    rotation_class: IV
+    env_aliases:
+      - OP_SERVICE_ACCOUNT_TOKEN
+  - id: agentmail-api
+    op_item: agentmail-vade-coo
+    op_field: credential
+    status: active
+    rotation_class: III
+    env_aliases:
+      - AGENTMAIL_API_KEY
+SCHEMA_EOF
+export VADE_COO_MEMORY_DIR="$FIXTURE_DIR"
+
 PASS=0
 FAIL=0
 declare -a FAILURES=()
@@ -30,7 +75,7 @@ SCHEMA_PATH="${VADE_COO_MEMORY_DIR:-/home/user/coo-memory}/operations/secrets/sc
 
 # Tmp dir for synthetic agent frontmatter files
 TMP_AGENTS="$(mktemp -d)"
-trap 'rm -rf "$TMP_AGENTS"' EXIT
+trap 'rm -rf "$TMP_AGENTS" "$FIXTURE_DIR"' EXIT
 
 # Write a synthetic agent frontmatter with env_allowlist
 write_agent_md() {

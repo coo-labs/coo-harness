@@ -21,6 +21,35 @@ HOOK="$SCRIPT_DIR/../hooks/postuse-bash-redactor.sh"
 command -v jq >/dev/null || { echo "FAIL: jq required"; exit 1; }
 command -v python3 >/dev/null || { echo "FAIL: python3 required"; exit 1; }
 
+# Stage a minimal coo-memory fixture so the hook's schema reader resolves
+# to a real file with secret_shapes for ghp_ and github_pat_ patterns.
+# Without this, §1/§3 (which expect redaction of synthetic PATs) silently
+# pass-through when /home/user/coo-memory isn't accessible — passes on the
+# dev container, fails on the CI runner. §5 explicitly overrides
+# VADE_COO_MEMORY_DIR to a nonexistent path for the fail-open check.
+FIXTURE_DIR="$(mktemp -d -t redactor-fixture.XXXXXX)"
+trap 'rm -rf "$FIXTURE_DIR"' EXIT
+mkdir -p "$FIXTURE_DIR/operations/secrets"
+cat > "$FIXTURE_DIR/operations/secrets/schema.yaml" <<'SCHEMA_EOF'
+schema_version: 1
+vault: COO
+credentials:
+  - id: github-pat-vade-coo
+    op_item: vade-coo-self-2026-04
+    op_field: token
+    status: active
+    rotation_class: III
+    env_aliases:
+      - GITHUB_MCP_PAT
+      - GITHUB_TOKEN
+secret_shapes:
+  - name: github-classic-pat
+    pattern: 'ghp_[A-Za-z0-9]{36}'
+  - name: github-fine-grained-pat
+    pattern: 'github_pat_[A-Za-z0-9_]{82}'
+SCHEMA_EOF
+export VADE_COO_MEMORY_DIR="$FIXTURE_DIR"
+
 PASS=0
 FAIL=0
 declare -a FAILURES=()

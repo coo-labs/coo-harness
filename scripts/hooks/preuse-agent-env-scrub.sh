@@ -179,10 +179,18 @@ for k in sorted(current_env.keys()):
 print(f"ALLOWED_COUNT\t{len(current_env) - len(scrub_set)}")
 print(f"SCRUB_COUNT\t{len(scrub_set)}")
 print(f"AGENT_ALLOWLIST\t{','.join(agent_allowlist) if agent_allowlist else '(none)'}")
-for entry in scrub_set[:50]:  # cap output to 50 vars for log readability
+# Emit every SECRET entry unconditionally — the bash side greps these to
+# compute secret_count; truncating SECRETs for "log readability" silently
+# masks the block-decision and breaks the hook's primary contract. Only
+# UNKNOWN entries are capped for log volume.
+secret_entries  = [e for e in scrub_set if e.startswith('SECRET\t')]
+unknown_entries = [e for e in scrub_set if not e.startswith('SECRET\t')]
+for entry in secret_entries:
     print(f"SCRUB\t{entry}")
-if len(scrub_set) > 50:
-    print(f"SCRUB_OVERFLOW\t{len(scrub_set) - 50} additional vars truncated from log")
+for entry in unknown_entries[:50]:
+    print(f"SCRUB\t{entry}")
+if len(unknown_entries) > 50:
+    print(f"SCRUB_OVERFLOW\t{len(unknown_entries) - 50} additional vars truncated from log")
 PY
 )"
 
