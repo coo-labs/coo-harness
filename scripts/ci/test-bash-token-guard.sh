@@ -14,7 +14,7 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-HOOK="$SCRIPT_DIR/../bash-token-guard.sh"
+HOOK="$SCRIPT_DIR/../hooks/bash-token-guard.sh"
 
 [ -x "$HOOK" ] || { echo "FAIL: hook not executable at $HOOK"; exit 1; }
 command -v jq >/dev/null || { echo "FAIL: jq required"; exit 1; }
