@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# PreToolUse Agent hook: refuse dispatch of built-in subagents that
-# default to Haiku unless the caller passes an explicit `model:`
-# argument. Forces the dispatcher to make a calibrated model choice
-# rather than silently inheriting Haiku.
+# PreToolUse Agent hook: auto-inject `model: "sonnet"` for built-in
+# subagents that default to Haiku ({Explore, claude-code-guide}) when
+# the caller omits the model parameter. Preserves cost-safety from the
+# silent-Haiku failure mode without forcing a refuse-and-retry round-
+# trip on every honest forgetting.
 #
 # Why: Per https://code.claude.com/docs/en/sub-agents.md the built-in
 # `Explore` and `claude-code-guide` subagents are pinned to Haiku. The
@@ -12,29 +13,30 @@
 # the failure profile this produces: high-confidence shallow
 # heuristics, uncalibrated assertions, plausible hallucinations that
 # fail under verification. The motivating audit is
-# coo-labs/coo-logs#347 (Phase-1 orientation pass: two Explore
-# sub-agents made confident attribution errors based on branch-name
-# heuristics; both required active disambiguation in parent context).
+# coo-labs/coo-logs#347.
 #
-# Block rule:
+# The pre-coo-harness#501 version REFUSED these calls and demanded a
+# retry. That forced a round-trip on every honest omission. This
+# version preserves the safety property — Haiku is never silently used
+# — by injecting `model: "sonnet"` via `updatedInput`. The caller can
+# still pass `model: "haiku"` explicitly for narrow lookups; the
+# discipline shifts from "must type to choose" to "safe default with
+# documented override."
+#
+# Auto-inject rule:
 #   tool_input.subagent_type ∈ {"Explore", "claude-code-guide"}
 #   AND (tool_input.model is missing OR empty string)
+#   → emit updatedInput with .model = "sonnet" + additionalContext
 #
 # Allow rules:
-#   - tool_input.model is any non-empty string. Even `"haiku"` is
-#     allowed — the act of typing it IS the calibrated choice. Silent
-#     omission is what we refuse.
+#   - tool_input.model is any non-empty string. The act of typing it
+#     IS the calibrated choice; the hook does not override.
 #   - subagent_type is any other value (Plan and general-purpose
 #     inherit the parent's model; statusline-setup is Sonnet by
 #     default; all custom `.claude/agents/*.md` agents in this
 #     substrate pin `model:` in frontmatter).
 #
-# Bypass: none. The intervention is exactly to force the choice. If
-# you genuinely want silent-Haiku behavior on a per-call basis, pass
-# `model: "haiku"` — that satisfies the rule and documents your intent
-# in the call site.
-#
-# Reference: MEMO-2026-05-25-<suffix>; coo-memory#781;
+# Reference: coo-harness#501; coo-memory#781;
 # operations/parallel_instance_protocol.md §8.6.
 
 set -uo pipefail
@@ -55,10 +57,17 @@ if [ -n "$model" ]; then
   exit 0
 fi
 
-reason="[agent-model-guard] Built-in subagent '${subagent_type}' defaults to Haiku per code.claude.com/docs/en/sub-agents.md. Pass an explicit \`model:\` argument so the choice is calibrated: \`\"sonnet\"\` (or higher) for any result the parent will act on; \`\"haiku\"\` only when the result will be independently verified by the caller (e.g. a narrow file-existence check, a one-line lookup). Silent omission is refused because the failure profile of Haiku on load-bearing work — high-confidence shallow heuristics, uncalibrated assertions, plausible hallucinations — propagates errors that the parent then has to disambiguate. See operations/parallel_instance_protocol.md §8.6 and MEMO references in coo-memory#781."
+context="[agent-model-guard] Auto-injected model=\"sonnet\" for built-in subagent '${subagent_type}' (omitted on the call). Override with \`model: \"haiku\"\` only when the result is independently verifiable (narrow file-existence check, one-line lookup). See operations/parallel_instance_protocol.md §8.6."
 
-jq -n --arg reason "$reason" '{
-  decision: "block",
-  reason: $reason
-}'
+printf '%s' "$input" | jq --arg ctx "$context" '
+  .tool_input.model = "sonnet" |
+  {
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "allow",
+      updatedInput: .tool_input,
+      additionalContext: $ctx
+    }
+  }
+'
 exit 0
