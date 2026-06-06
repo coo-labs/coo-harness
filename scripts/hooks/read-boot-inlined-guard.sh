@@ -32,7 +32,7 @@
 #   - */memos/memo_index.json
 #     Flat JSON, ≳25K tokens, regenerated each container epoch from
 #     memos/*.md by the `memo-index` SessionStart hook. 10-most-recent
-#     in digest; deeper slices via `jq` per operations/memo-access.md.
+#     in digest; deeper slices via `jq` per .claude/skills/memo-search/references/retrieval-policy.md.
 #   - */identity/identity_layer.md
 #     Fully inlined in the digest's "Identity layer (CB-*/OG-*)" block.
 #     If genuinely truncated, force-read via `cat` from Bash.
@@ -66,7 +66,7 @@ case "$file_path" in
     reason="[read-boot-inlined-guard] memos/memo_index.json is regenerated each container epoch from memos/*.md and the 10-most-recent slice is already in the boot digest's \"Latest memos\" block. The full file is ≳25K tokens — Read would dump it into context unnecessarily.
 
 Use one of:
-  - \`jq '...' memos/memo_index.json\` from a Bash call for deeper slices (schema: operations/memo-access.md).
+  - \`jq '...' memos/memo_index.json\` from a Bash call for deeper slices (schema: .claude/skills/memo-search/references/retrieval-policy.md).
   - \`/memo-query <term>\` for literal keyword lookup.
   - \`/memo-query --semantic \"<query>\"\` for concept search.
 

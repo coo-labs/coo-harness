@@ -276,7 +276,7 @@ else
   # memo lands closest to the user prompt.
   #
   # Prints only id + status + title. Full schema is documented in
-  # operations/memo-access.md. The index uses ~19K tokens at ~95
+  # .claude/skills/memo-search/references/retrieval-policy.md. The index uses ~19K tokens at ~95
   # memos post-coo-memory#351 — agents needing other slices
   # should jq the file rather than Read it.
   if digest_out=$(jq -r '
@@ -290,7 +290,7 @@ else
     echo "  (memo_index.json present but unparseable; skipping digest)"
   fi
   echo ""
-  echo "Deeper slices: jq '...' memos/memo_index.json (flat array — schema in operations/memo-access.md)"
+  echo "Deeper slices: jq '...' memos/memo_index.json (flat array — schema in .claude/skills/memo-search/references/retrieval-policy.md)"
 fi
 
 echo "───────────────────────────────────────────────────────────────"
