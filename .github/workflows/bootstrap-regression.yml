@@ -25,11 +25,19 @@ name: Bootstrap regression
 #                              MEMO-2026-06-05-v5qk).
 #   R8  boot brake             PreToolUse-deny-on-FAIL contract (memo
 #                              -nzxf flipped to block-on-FAIL).
-#                              R8.full (round-trip with degraded
-#                              integrity-check JSON) is Layer-1.5 scope.
+#   R8.full boot brake         End-to-end deny-on-FAIL round-trip:
+#       round-trip             stage failing integrity-check JSON, pipe
+#                              PreToolUse envelope through the guard,
+#                              assert deny + whitelist allow. Covered
+#                              by test-boot-brake-roundtrip.sh
+#                              (coo-memory#1250 Layer-1.5).
 #   R9  post-bootstrap-chain   `coo-bootstrap → post-bootstrap-chain →
-#       ordering               5 ordered children` (memo -ootw).
-#                              Layer-1.5 scope; not in this workflow yet.
+#       ordering               5 ordered children` (memo -ootw). Covered
+#                              by test-post-bootstrap-chain.sh: asserts
+#                              canonical order via the chain's JSONL
+#                              trace surface + failure isolation under
+#                              fault injection (coo-memory#1250
+#                              Layer-1.5).
 #   R10 PAT-cache freshness    Silent gh-write detection on stale PAT
 #                              cache (memo -r9rt). No test exists yet.
 #   R11 hook + wrapper         Per-script smoke tests for individual
@@ -265,6 +273,16 @@ jobs:
           # PyYAML for the manifest reader
           pip install --quiet pyyaml
           bash "$GITHUB_WORKSPACE/scripts/ci/test-boot-brake-guard.sh"
+
+      # ── Layer-1.5 integration (R8.full + R9) ─────────────────
+      # coo-memory#1250: closes the two gaps PR-510 carved out — the
+      # full boot-brake deny-on-FAIL round-trip and the
+      # post-bootstrap-chain 5-ordered-children contract.
+      - name: Layer-1.5 — boot-brake deny-on-FAIL round-trip (R8.full)
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/test-boot-brake-roundtrip.sh"
+
+      - name: Layer-1.5 — post-bootstrap-chain ordering + failure isolation (R9)
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/test-post-bootstrap-chain.sh"
 
       # ── Group S secrets-schema invariants (R7) ───────────────
       - name: Install yq (Go) for Group S tests
