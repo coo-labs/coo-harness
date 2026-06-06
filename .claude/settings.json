@@ -294,6 +294,8 @@
       "Edit(/tmp/**)",
       "Write(/tmp/**)",
       "Read(/tmp/**)",
+      "Edit(/home/user/coo-memory/.claude/_lib/**)",
+      "Write(/home/user/coo-memory/.claude/_lib/**)",
       "Bash(jq '.permissions.allow |= map\\(select\\(\\(. | contains\\(\"vade-canvas\"\\) | not\\) and \\(. | contains\\(\"canvas-\"\\) | not\\)\\)\\)' .claude/settings.json)",
       "Bash(mv .claude/settings.json.tmp .claude/settings.json)",
       "Bash(echo \"=== count Mac-local path refs in settings.json ===\" && grep -c \"GitHub/coo-labs/vade-\\\\|/coo-harness/\\\\|/coo-memory/\\\\|/coo-logs/\\\\|/vade-canvas/\" .claude/settings.json && echo \"\" && echo \"=== apply bulk replacement ===\" && sed -i \\\\ *)",
