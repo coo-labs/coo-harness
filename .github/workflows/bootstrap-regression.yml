@@ -1,27 +1,79 @@
 name: Bootstrap regression
 
-# Layer-1 script-level CI for the cloud bootstrap chain.
-# Tracks coo-labs/coo-harness#86. Layer-2 (SDK-driven harness test)
-# lives at #85 and is out of scope here.
+# Layer-1 script-level CI for the cloud bootstrap chain — the kernel's
+# non-bypassable G2 `drift-watch` backstop for boot-script regressions
+# (coo-memory#933 CI strategy; coo-memory#1013 refactor; defense-in-depth-
+# perpetual layer paired with the fresh-container manual ritual at merge).
 #
-# What this catches that production currently catches via "open a fresh
-# Claude Code session and watch the digest":
-#   - #66 env-merge before validate
-#   - #72 cached-PAT recheck on marker shortcut
-#   - #73 digest path resolver
-#   - #83 settings.json env injection
+# ── Regression-class taxonomy ──────────────────────────────────
 #
-# What it does NOT cover (Layer-2 territory):
-#   - Claude Code reading settings.json + loading skills + MCP startup
-#   - macOS local-setup.sh surface
-#   - Live 1Password / live GitHub PAT round-trips (mocked here)
+#   R1  snapshot-build         Group A invariants (receipts, build.log,
+#                              symlink targets).
+#   R2  hook-chain wiring      Group B invariants (every settings.json
+#                              hook command path resolves + executes).
+#   R3  symlinks + MCP         Group C invariants (workspace CLAUDE.md /
+#       projection             .mcp.json symlinks, mcp.json parses).
+#   R4  identity bootstrap     Group D invariants (OP token, marker,
+#                              gitconfig identity, SSH keys, op-read
+#                              failure tracking).
+#   R5  MCP startup + remote   Group E invariants (Mem0 round-trip, R2
+#       round-trips            cipher/meta parity, Cloudflare-verify).
+#                              E1–E4 skip by design (live MCP probes).
+#   R7  secrets schema         Group S invariants (S1–S10; schema-driven
+#                              secrets-management v1 per MEMO-2026-05-22-
+#                              3678 + S9/S10 anti-regression layer per
+#                              MEMO-2026-06-05-v5qk).
+#   R8  boot brake             PreToolUse-deny-on-FAIL contract (memo
+#                              -nzxf flipped to block-on-FAIL).
+#                              R8.full (round-trip with degraded
+#                              integrity-check JSON) is Layer-1.5 scope.
+#   R9  post-bootstrap-chain   `coo-bootstrap → post-bootstrap-chain →
+#       ordering               5 ordered children` (memo -ootw).
+#                              Layer-1.5 scope; not in this workflow yet.
+#   R10 PAT-cache freshness    Silent gh-write detection on stale PAT
+#                              cache (memo -r9rt). No test exists yet.
+#   R11 hook + wrapper         Per-script smoke tests for individual
+#       contracts              hooks under scripts/hooks/ and wrappers
+#                              under scripts/{gh,op,git}-*.
+#
+# R6 (culture-substrate / Group F) stays out — F1–F8 skip in CI because
+# the staged coo-memory is a stub, and the substrate is what's being
+# protected, not tested.
+#
+# ── Job map ────────────────────────────────────────────────────
+#
+#   bootstrap-end-to-end       R1 R2 R3 R4 R5 (full chain) — fake-env
+#                              snapshot → resume → integrity-check.
+#   hook-and-wrapper-tests     R7 R8 R11 — per-script smoke tests for
+#                              hooks (PreToolUse / PostToolUse / Write|
+#                              Edit / Read), wrappers (gh / op / git),
+#                              token + cache helpers, transcript /
+#                              lifecycle scripts, integrity Group S.
+#
+# Layer-2 (SDK-driven harness test — exercises Claude Code reading
+# settings.json, MCP startup, skill loading, live PAT round-trips) is
+# explicitly out of scope here; that's coo-harness#85.
 
 on:
   pull_request:
     paths:
-      - 'scripts/**'
-      - '.claude/**'
+      # Boot pipeline — scripts that run at SessionStart / on every tool call
+      - 'scripts/boot/**'
+      - 'scripts/hooks/**'
+      - 'scripts/lib/**'
+      - 'scripts/lifecycle/**'
+      # Boot-pipeline wrappers (top-level)
+      - 'scripts/gh-*.sh'
+      - 'scripts/op-*.sh'
+      - 'scripts/git-*.sh'
+      - 'scripts/check-pat-freshness.sh'
+      - 'scripts/aggregator.yml'
+      - 'scripts/issue-comments.sh'
+      # CI driver, mocks, fixtures, individual smoke tests
+      - 'scripts/ci/**'
+      # Substrate-wiring surface
       - '.mcp.json'
+      - '.claude/**'
       - 'versions.lock'
       - 'Dockerfile'
       - '.github/workflows/bootstrap-regression.yml'
@@ -41,7 +93,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  bootstrap:
+  bootstrap-end-to-end:
+    # Covers R1–R5 (Groups A,B,C,D,E partial) + R7 partial (via
+    # integrity-check.sh's Group S calls).
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -93,20 +147,87 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-  transcript-redaction:
-    # Fast standalone job for the redaction engine + Secret Registration
-    # Rule. Independent of the heavy bootstrap-regression job above
-    # because it doesn't need a staged workspace — just python3 + jq.
-    # Origin: coo-labs/coo-logs#64.
+  hook-and-wrapper-tests:
+    # Covers R7 (Group S helpers), R8 (boot-brake guard), R11 (individual
+    # hook + wrapper contracts). Independent of the heavy end-to-end job
+    # above because each step is a self-contained smoke test on top of
+    # python3 + jq + (occasionally) PyYAML — all preinstalled on
+    # ubuntu-latest.
+    #
+    # Step order: PreToolUse hooks → Write|Edit/Read hooks → spawn hooks
+    # → PostToolUse hooks → wrappers → token+cache helpers → transcript
+    # + lifecycle → boot brake → Group S → schema iterator.
+    #
+    # Excluded for now:
+    #   - test-gh-coo-wrap.sh: env-isolation bug (host GITHUB_MCP_PAT
+    #     leaks into the wrapper under test, masking the
+    #     PUBLIC_PAT-unset assertion). File as follow-on under #933.
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 6
     steps:
       - name: Checkout PR
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: Redaction engine — corpus + thinking + negative tests
+      # ── PreToolUse hook contracts (R11) ──────────────────────
+      - name: PreToolUse — agent-model-guard (auto-inject sonnet for Explore / claude-code-guide)
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/test-agent-model-guard.sh"
+
+      - name: PreToolUse — bash-token-guard (schema-driven token blocking)
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/test-bash-token-guard.sh"
+
+      - name: PreToolUse — bash-github-api-guard (raw api.github.com refusal)
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/test-bash-github-api-guard.sh"
+
+      - name: PreToolUse — bash-token-guard extended (schema regression + ghp_-shape)
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/test-track2-token-guard-ext.sh"
+
+      # ── Write|Edit / Read hook contracts (R11) ───────────────
+      - name: Write|Edit — skill-yaml-guard (frontmatter shape lint)
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/test-skill-yaml-guard.sh"
+
+      - name: Read — read-boot-inlined-guard (force-read past inline-truncation banner)
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/test-read-boot-inlined-guard.sh"
+
+      # ── Spawn / PostToolUse hook contracts (R11) ─────────────
+      - name: Agent — preuse-agent-env-scrub (warn vs enforce; frontmatter allowlist)
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/test-track2-env-scrub.sh"
+
+      - name: PostToolUse — bash-redactor (PAT-shape detection in tool output)
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/test-track2-redactor.sh"
+
+      - name: PostToolUse — auto-subscribe-pr (matcher contract; wrapper + raw)
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/test-auto-subscribe-pr.sh"
+
+      # ── Wrapper contracts (R11) ──────────────────────────────
+      - name: Wrapper — op-coo-wrap (SA token rate-limit fallback to BACKUP)
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/test-op-coo-wrap.sh"
+
+      - name: Wrapper — git-shim (git push interception → git-push-with-fallback)
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/test-git-shim.sh"
+
+      - name: Wrapper — git-push-with-fallback (op:// PAT resolution + leak hardening)
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/test-git-push-fallback.sh"
+
+      - name: Wrapper — issue-comments (default projection, --full, --limit, --max-bytes)
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/test-issue-comments.sh"
+
+      # ── Token + cache helpers (R11) ──────────────────────────
+      - name: op-read retry recovery — install_coo_ssh_keys path
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/test-op-retry-recovery.sh"
+
+      - name: install_coo_ssh_keys idempotent skip
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/test-install-coo-ssh-keys-idempotent.sh"
+
+      - name: bootstrap op caches (materialize_app_key_cache; gh-app-token cache reuse)
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/test-bootstrap-op-caches.sh"
+
+      - name: materialize_mcp_env (tmpfs MCP env templates; no op:// refs at boot)
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/test-materialize-mcp-env.sh"
+
+      # ── Transcript + lifecycle (R11) ─────────────────────────
+      - name: Transcript redaction engine — corpus + thinking + negative tests
         run: python3 "$GITHUB_WORKSPACE/scripts/ci/test-transcript-redaction.py"
 
       - name: Install age (apt)
@@ -131,18 +252,7 @@ jobs:
       - name: Identity digest — gap-warning contract (coo-memory#1069)
         run: bash "$GITHUB_WORKSPACE/scripts/ci/test-digest-gap-warnings.sh"
 
-      - name: Auto-subscribe PR hook — matcher contract (wrapper + raw)
-        run: bash "$GITHUB_WORKSPACE/scripts/ci/test-auto-subscribe-pr.sh"
-
-      - name: op-read retry recovery — install_coo_ssh_keys path (coo-harness#451)
-        run: bash "$GITHUB_WORKSPACE/scripts/ci/test-op-retry-recovery.sh"
-
-      - name: install_coo_ssh_keys idempotent skip (coo-harness#473)
-        run: bash "$GITHUB_WORKSPACE/scripts/ci/test-install-coo-ssh-keys-idempotent.sh"
-
-      - name: Git push fallback — op:// PAT resolution + leak hardening (coo-harness#457, #124)
-        run: bash "$GITHUB_WORKSPACE/scripts/ci/test-git-push-fallback.sh"
-
+      # ── Boot brake (R8) ──────────────────────────────────────
       - name: Boot brake — guard + clear hook contract (coo-memory#1082 v2 §7)
         env:
           VADE_COO_MEMORY_DIR: ${{ github.workspace }}/coo-memory
@@ -156,6 +266,7 @@ jobs:
           pip install --quiet pyyaml
           bash "$GITHUB_WORKSPACE/scripts/ci/test-boot-brake-guard.sh"
 
+      # ── Group S secrets-schema invariants (R7) ───────────────
       - name: Install yq (Go) for Group S tests
         # Group S helpers parse schema.yaml via yq. The Python yq
         # (apt's `yq`) has different syntax; install the Go binary
@@ -174,3 +285,6 @@ jobs:
           # test runner's _stage_memory fallback).
           pip install --quiet jsonschema pyyaml
           bash "$GITHUB_WORKSPACE/scripts/ci/test-integrity-group-s.sh"
+
+      - name: Track 4 schema-iterator — schema-fetch-secrets.py round-trip
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/test-track4-schema-iterator.sh"
