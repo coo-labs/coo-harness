@@ -1,0 +1,55 @@
+name: Registry drift-check (reusable)
+
+# Reusable workflow: asserts coo-labs/.github/repos.yaml matches the
+# live coo-labs org state — membership, visibility, status. Wraps
+# scripts/registry-check.sh, which lives next to this workflow in
+# coo-harness (kernel scope per F11; see MEMO-2026-05-25-txjg). The
+# script's prior split — workflow in coo-labs/.github, script here —
+# violated G5 substrate-self-describes ("one canonical path per concern")
+# and required a cross-repo checkout from the trigger side. This
+# reusable absorbs both.
+#
+# Canonical home: coo-labs/coo-harness/.github/workflows/registry-check-reusable.yml
+# Co-location source: coo-labs/coo-memory#1018 (G5 substrate-self-describes).
+# Script source: coo-memory#999 (F17b drift-check; load-bearing).
+#
+# Trigger contract for callers (see coo-labs/.github thin trigger):
+#   on:
+#     pull_request:
+#       paths: ['repos.yaml', '.github/workflows/registry-check.yml']
+#     push:
+#       branches: [main]
+#       paths: ['repos.yaml']
+#     schedule:
+#       - cron: '0 12 * * *'
+#     workflow_dispatch:
+#   permissions:
+#     contents: read
+#   jobs:
+#     drift-check:
+#       uses: coo-labs/coo-harness/.github/workflows/registry-check-reusable.yml@main
+#       secrets: inherit
+
+on:
+  workflow_call:
+    secrets:
+      VADE_FIELDS_ADMIN_PAT:
+        description: "Org-secret mirror of the COO PAT (visibility=all). Required to enumerate private repos that github.token cannot see."
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  drift-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout coo-harness (script lives here per F11 kernel scope)
+        uses: actions/checkout@v4
+        with:
+          repository: coo-labs/coo-harness
+
+      - name: Run registry-check
+        env:
+          GH_TOKEN: ${{ secrets.VADE_FIELDS_ADMIN_PAT }}
+        run: bash scripts/registry-check.sh
