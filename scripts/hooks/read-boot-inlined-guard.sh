@@ -36,6 +36,11 @@
 #   - */identity/identity_layer.md
 #     Fully inlined in the digest's "Identity layer (CB-*/OG-*)" block.
 #     If genuinely truncated, force-read via `cat` from Bash.
+#   - */.vade/brake-key.*
+#     SH2 (coo-memory#1167): per-session boot-brake HMAC key (32 random
+#     bytes hex-encoded). Read access would let an attacker forge
+#     override sentinels. Denied unconditionally; no diagnostic need
+#     justifies surfacing the key bytes into agent context.
 #
 # Scope: Read only. Edit / Write / Bash all pass through — committee
 # revisions, /memo-sync regenerations, and `jq`/`cat` queries against
@@ -83,6 +88,11 @@ If the digest was genuinely truncated this session, force-read via:
 Edit/Write are unblocked — committee revisions and citation updates still work normally.
 
 Bypass for a deliberate diagnostic: prefix \`VADE_BOOT_INLINED_READ_GUARD_BYPASS=1\`. See coo-harness#399."
+    ;;
+  */.vade/brake-key.*)
+    reason="[read-boot-inlined-guard] \$HOME/.vade/brake-key.<session_id> holds the per-session boot-brake HMAC key. Read access would let an attacker who reaches the agent's Read tool forge override sentinels. There is no diagnostic case for exposing the bytes — the key is intentionally write-only outside the guard and unbrake.sh.
+
+If you need to confirm the key file exists for a recovery procedure, use \`ls -la \$HOME/.vade/brake-key.*\` from Bash. See coo-memory#1167 SH2."
     ;;
 esac
 

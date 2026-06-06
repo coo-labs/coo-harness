@@ -89,27 +89,61 @@ def now_iso():
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
-def derive_hmac_key():
-    src = os.environ.get("OP_SERVICE_ACCOUNT_TOKEN", "")
-    if not src:
-        src = os.environ.get("MEM0_API_KEY", "") or os.environ.get("GITHUB_MCP_PAT", "")
-    if not src:
-        src = "vade-boot-brake-default-no-secrets"
-    return hashlib.sha256(src.encode("utf-8")).digest()
+# SH2 (coo-memory#1167): per-session brake key written by
+# boot-brake-clear.sh at $HOME/.vade/brake-key.<session_id> (mode 0600,
+# 64 hex chars = 32 random bytes). Replaces the prior derivation that
+# reused OP_SERVICE_ACCOUNT_TOKEN as the HMAC root — that widened the
+# SA-token exposure surface (Read /proc/self/environ) and let any
+# process holding it forge overrides. Per-session keying scopes forgery
+# resistance to the file system, which Read can no longer touch
+# (read-boot-inlined-guard.sh denies brake-key.* lookups).
+def load_brake_key(home, session_id):
+    """Return per-session HMAC key bytes, or None if unavailable.
+
+    Failing closed (no key → no valid HMAC) is intentional: an override
+    sentinel written without a matching key is structurally rejected.
+    """
+    key_path = Path(home) / ".vade" / f"brake-key.{session_id}"
+    try:
+        with open(key_path, "rb") as fh:
+            data = fh.read().strip()
+        if len(data) != 64:
+            return None
+        return bytes.fromhex(data.decode("ascii"))
+    except (OSError, ValueError):
+        return None
 
 
-def compute_hmac(granted_at, expires_at, session_id, reason):
+def compute_hmac(granted_at, expires_at, session_id, reason, key):
     """HMAC over length-prefixed canonical form.
 
     Length-prefixing closes the delimiter-injection attack: a `reason`
     containing `|` cannot produce a colliding MAC by reshuffling fields
     (security-review SC3). `expires_at` is included in the MAC scope so
     a captured override cannot have its TTL extended (security-review
-    SC1). Field order is fixed; the unbrake.sh writer must match.
+    SC1). `key` is the per-session brake-key bytes (SH2 / #1167); the
+    unbrake.sh writer must source the same file. Field order is fixed.
     """
     parts = (str(granted_at), str(expires_at), str(session_id), str(reason))
     msg = "|".join(f"{len(p)}:{p}" for p in parts).encode("utf-8")
-    return hmac.new(derive_hmac_key(), msg, hashlib.sha256).hexdigest()
+    return hmac.new(key, msg, hashlib.sha256).hexdigest()
+
+
+def parse_iso_epoch(iso_str):
+    """Polish P3 (coo-memory#1167): parse ISO-8601 to epoch seconds.
+
+    Returns None if unparseable. Tolerates both `Z` and `.fffZ` suffixes.
+    The override-sentinel `expires_at` comparison uses this instead of
+    lexicographic string compare so a mixed-precision timestamp pair
+    (one with milliseconds, one without) doesn't misorder.
+    """
+    if not iso_str:
+        return None
+    try:
+        clean = str(iso_str).split(".")[0].rstrip("Z")
+        return time.mktime(time.strptime(clean, "%Y-%m-%dT%H:%M:%S")) - time.timezone
+    except (ValueError, OverflowError, TypeError):
+        return None
 
 
 def atomic_write_json(path, payload):
@@ -136,14 +170,40 @@ def atomic_write_json(path, payload):
 EVENT_SCHEMA_VERSION = 1
 
 
+def _sanitize_event_values(obj):
+    """SH3 (coo-memory#1167): recursively sanitize string values for
+    log-write safety. Centralises sanitisation at the write boundary so
+    every append_event callsite is covered uniformly — attacker-controlled
+    paths, deliverable ids, producer names, etc. land in brake-events.jsonl
+    already stripped of shell metachars and sentence delimiters, closing
+    the prompt-injection path that lets a later Read of the event log
+    smuggle instructions back into agent context.
+    """
+    if isinstance(obj, dict):
+        return {k: _sanitize_event_values(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_event_values(v) for v in obj]
+    if isinstance(obj, str):
+        return sanitize(obj, max_len=500)
+    return obj
+
+
 def append_event(state_dir, event):
     path = Path(state_dir) / "brake-events.jsonl"
     try:
         if "v" not in event:
             event = {"v": EVENT_SCHEMA_VERSION, **event}
+        event = _sanitize_event_values(event)
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "a") as fh:
             fh.write(json.dumps(event, separators=(",", ":")) + "\n")
+        # M3 (coo-memory#1167): event log contains session-identifying
+        # material; match the override sentinel's 0600 mode rather than
+        # inherit umask default (likely 0644).
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
     except Exception:
         pass
 
@@ -309,6 +369,34 @@ def load_yaml_manifest(manifest_path):
         return None, f"manifest unparseable: {type(e).__name__}: {e}"
 
 
+def verify_manifest_pin(manifest_path, env):
+    """SH1 (coo-memory#1167): verify manifest content-hash against
+    VADE_BRAKE_MANIFEST_SHA256 pinned in the cloud env.
+
+    A warn-mode session could Edit/Write the manifest and silently
+    neuter a deliverable; when the brake later flips back to block-mode
+    the tampered manifest would be enforced. Pinning the expected
+    SHA256 in settings.json env (rewritten in lockstep with manifest
+    changes) makes the tamper detectable: hash mismatch becomes a
+    validator self-fault.
+
+    Returns (ok, expected_sha, actual_sha). When the pin is unset the
+    check is opt-in and returns ok=True with shas=None — the migration
+    posture. Future PRs may flip to required.
+    """
+    expected = (env.get("VADE_BRAKE_MANIFEST_SHA256") or "").strip().lower()
+    if not expected:
+        return True, None, None
+    try:
+        with open(manifest_path, "rb") as fh:
+            actual = hashlib.sha256(fh.read()).hexdigest()
+    except OSError:
+        return False, expected, None
+    if actual != expected:
+        return False, expected, actual
+    return True, expected, actual
+
+
 def resolve_path(entry, env):
     raw = entry.get("path", "")
     root = entry.get("root", "")
@@ -422,9 +510,16 @@ def check_deliverable(entry, env, home, session_id, cwd):
             expanded_glob = predicate_glob
             for var in ("VADE_CLOUD_STATE_DIR", "VADE_COO_MEMORY_DIR", "VADE_RUNTIME_DIR", "HOME"):
                 expanded_glob = expanded_glob.replace(f"${var}", env.get(var, ""))
-            # The cwd is part of the per-session project dir naming
-            expanded_glob = expanded_glob.replace("$CWD_DASHIFIED", cwd.replace("/", "-"))
-            expanded_glob = expanded_glob.replace("$SESSION_ID", session_id)
+            # Polish P2 (coo-memory#1167): escape glob metacharacters in
+            # substituted values so a malicious cwd / session_id can't
+            # reshape the glob (e.g. inject `*` or `[` into the literal
+            # subdirectory the predicate is supposed to be checking).
+            expanded_glob = expanded_glob.replace(
+                "$CWD_DASHIFIED", glob.escape(cwd.replace("/", "-"))
+            )
+            expanded_glob = expanded_glob.replace(
+                "$SESSION_ID", glob.escape(session_id)
+            )
             try:
                 matches = glob.glob(expanded_glob)
             except Exception:
@@ -504,15 +599,31 @@ def read_cached_sentinel(path):
         return None, f"read error: {type(e).__name__}"
 
 
-def check_override(home, session_id):
+def check_override(home, session_id, parent_session_id=""):
     """Returns (allowed, info_dict|None).
 
-    Rejects forged overrides per security review:
+    Rejects forged overrides per security review and SH-series patches:
+      - SH4 (coo-memory#1167): if `parent_session_id` is set and differs
+        from `session_id`, this is a sub-agent invocation. Refuse the
+        override regardless of the file's session_id field — the
+        parent's `/unbrake` must not propagate down dispatch.
+      - SH2 (coo-memory#1167): HMAC is keyed by the per-session
+        brake-key file at $HOME/.vade/brake-key.<session_id>. If the
+        file is missing or malformed, no HMAC can validate.
+      - Polish P3 (coo-memory#1167): expires_at comparison parses to
+        epoch seconds and compares numerically — mixed-precision ISO
+        strings would misorder under lexicographic compare.
       - Empty/missing expires_at → treated as already expired (SC2).
       - expires_at is in the HMAC scope (SC1) so a captured override
         cannot be tampered to extend its TTL.
       - session_id mismatch → reject (does not propagate to sub-agents).
     """
+    if parent_session_id and parent_session_id != session_id:
+        return False, {
+            "failure": "parent_session_mismatch",
+            "parent_session_id": parent_session_id,
+        }
+
     path = Path(home) / ".vade" / f"boot-brake-override.{session_id}.json"
     if not path.exists():
         return False, None
@@ -525,16 +636,24 @@ def check_override(home, session_id):
     expires_at = ovr.get("expires_at", "")
     if not expires_at:
         return False, {"failure": "missing_expires_at"}
-    if expires_at < now_iso():
+    exp_epoch = parse_iso_epoch(expires_at)
+    if exp_epoch is None:
+        return False, {"failure": "unparseable_expires_at"}
+    if exp_epoch < time.time():
         return False, {"failure": "expired", "expired_at": expires_at}
     if ovr.get("session_id") != session_id:
         return False, {"failure": "session_mismatch"}
+
+    key = load_brake_key(home, session_id)
+    if key is None:
+        return False, {"failure": "no_brake_key"}
 
     expected_hmac = compute_hmac(
         ovr.get("granted_at", ""),
         expires_at,
         ovr.get("session_id", ""),
         ovr.get("reason", ""),
+        key,
     )
     if not hmac.compare_digest(expected_hmac, ovr.get("hmac", "")):
         return False, {"failure": "hmac_mismatch"}
@@ -644,7 +763,8 @@ def main():
 
     tool_name = event.get("tool_name", "")
     tool_input = event.get("tool_input", {}) or {}
-    session_id = event.get("session_id") or os.environ.get("CLAUDE_CODE_SESSION_ID", "unknown")
+    raw_session_id = event.get("session_id") or os.environ.get("CLAUDE_CODE_SESSION_ID", "unknown")
+    parent_session_id = event.get("parent_session_id", "") or ""
     cwd = event.get("cwd") or os.environ.get("PWD", "/home/user")
 
     env = os.environ
@@ -654,6 +774,28 @@ def main():
     mode = env.get("VADE_BRAKE_ENFORCE", "warn").lower()
     if mode == "off":
         sys.exit(0)
+
+    # Polish P1 (coo-memory#1167): validate session_id to a safe charset
+    # before threading it into file-path construction (override sentinel,
+    # session-reads log, boot-brake.<sid>.json, glob substitutions).
+    # An invalid session_id is replaced with "unknown" and logged — the
+    # brake stays functional but attacker-shaped session_ids cannot form
+    # arbitrary paths. Same treatment for parent_session_id.
+    if re.fullmatch(r"[A-Za-z0-9_-]{1,64}", raw_session_id):
+        session_id = raw_session_id
+    else:
+        session_id = "unknown"
+        append_event(state_dir, {
+            "ts": now_iso(),
+            "session_id": "unknown",
+            "cause": "invalid_session_id",
+            "raw_length": len(raw_session_id),
+        })
+    if parent_session_id and not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", parent_session_id):
+        # Discard a malformed parent_session_id silently — the SH4 check
+        # below would otherwise treat any non-empty differing string as
+        # a sub-agent signal. An invalid string is not a credible signal.
+        parent_session_id = ""
 
     # Track Read tool calls into a per-session log for the
     # identity_consumed check_kind. Do this before any deny path so the
@@ -667,7 +809,7 @@ def main():
     # Override sentinel takes precedence — if it's valid and unexpired,
     # allow unconditionally (logged once per session is enough; we log
     # every fire for audit completeness).
-    ovr_ok, ovr_info = check_override(home, session_id)
+    ovr_ok, ovr_info = check_override(home, session_id, parent_session_id)
     if ovr_ok:
         # Non-transition event: an override grant is not a state-machine
         # transition, so it carries no from/to (coo-memory#1168 O2). The
@@ -688,6 +830,17 @@ def main():
                 "session_id": session_id,
                 "cause": "manual_override_expired",
                 "expired_at": ovr_info.get("expired_at"),
+            })
+        elif fk == "parent_session_mismatch":
+            # SH4 (coo-memory#1167): sub-agent dispatch attempted to use
+            # the parent's override. Distinct cause for auditability
+            # (the operator's /unbrake granted in the parent shouldn't
+            # leak down task-dispatch).
+            append_event(state_dir, {
+                "ts": now_iso(),
+                "session_id": session_id,
+                "cause": "parent_session_mismatch",
+                "parent_session_id": ovr_info.get("parent_session_id", ""),
             })
         else:
             # O10: an override that fails HMAC / session / expires_at
@@ -809,11 +962,31 @@ def main():
             manifest, m_err = manifest_loaded, m_err_cached
         else:
             manifest, m_err = load_yaml_manifest(manifest_path)
-        if m_err:
+        # SH1 (coo-memory#1167): manifest tamper check. Verify the
+        # content-hash matches VADE_BRAKE_MANIFEST_SHA256 (pinned in the
+        # cloud env, rewritten in lockstep with manifest commits) before
+        # trusting the deliverables list. A pinned manifest that drifts
+        # from the expected hash is treated as a validator self-fault —
+        # the brake refuses to enforce a deliverables list it can't
+        # authenticate.
+        pin_ok = True
+        pin_err = ""
+        if not m_err:
+            pin_ok, pin_expected, pin_actual = verify_manifest_pin(manifest_path, env)
+            if not pin_ok:
+                pin_err = (
+                    f"manifest SHA pin mismatch: expected="
+                    f"{(pin_expected or '<unset>')[:16]} "
+                    f"actual={(pin_actual or '<unreadable>')[:16]}"
+                )
+
+        if m_err or not pin_ok:
             # Validator self-fault — record but DO NOT brick the agent in
             # Phase 0. The brake's own infrastructure failing should not
             # convert into a session lockout.
-            fault_path = write_fault(state_dir, f"validator self-fault: {m_err}")
+            fault_msg = m_err or pin_err
+            cause = "validator_self_fault" if m_err else "manifest_sha_mismatch"
+            fault_path = write_fault(state_dir, f"{cause}: {fault_msg}")
             sentinel = {
                 "state": "FAIL",
                 "checked_at": now_iso(),
@@ -821,20 +994,20 @@ def main():
                 "manifest_version": 0,
                 "failures": [{
                     "deliverable": "brake-validator",
-                    "reason": sanitize(m_err),
+                    "reason": sanitize(fault_msg),
                     "producer": "boot-brake-guard.py",
                 }],
                 "boot_started_at": (sentinel or {}).get("boot_started_at", now_iso()),
                 "content_hashes": {},
-                "cause": "validator_self_fault",
+                "cause": cause,
                 "fault_log": fault_path,
             }
             atomic_write_json(sentinel_path, sentinel)
             append_event(state_dir, {
                 "ts": now_iso(),
                 "session_id": session_id,
-                "cause": "validator_self_fault",
-                "reason": sanitize(m_err),
+                "cause": cause,
+                "reason": sanitize(fault_msg),
                 "fault_log": fault_path,
             })
         else:
