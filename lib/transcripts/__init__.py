@@ -33,6 +33,7 @@ from transcripts.r2 import (
     r2_client,
     r2_coordinates,
     read_sidecar,
+    write_html_object,
     write_sidecar,
 )
 from transcripts.schema import (
@@ -62,5 +63,6 @@ __all__ = [
     "read_entries",
     "read_sidecar",
     "strip_auto_notifications",
+    "write_html_object",
     "write_sidecar",
 ]
