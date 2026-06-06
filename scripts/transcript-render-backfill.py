@@ -38,9 +38,7 @@ and continue — backfill is intentionally best-effort, fail-soft.
 from __future__ import annotations
 
 import argparse
-import os
 import re
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -49,6 +47,14 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 RUNTIME_ROOT = SCRIPT_DIR.parent
 FETCH_SH = RUNTIME_ROOT / "scripts" / "lib" / "transcript-fetch.sh"
 RENDER_PY = RUNTIME_ROOT / "scripts" / "lifecycle" / "session-end-transcript-render.py"
+
+# Locate coo-harness/lib/ on sys.path so `from transcripts import ...` resolves
+# under the uv-run venv this script spawns into. See lib/transcripts/README.md
+# §"Importing" for the parents[N] table; this script lives at scripts/<top>.py
+# so parents[1] is the repo root.
+sys.path.insert(0, str(SCRIPT_DIR.parent / "lib"))
+
+from transcripts import R2Error, list_keys, r2_client, r2_coordinates  # noqa: E402
 
 SESSION_ID_RE = re.compile(
     r"^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$"
@@ -63,57 +69,12 @@ def _stderr(msg: str) -> None:
     sys.stderr.write(f"[transcript-render-backfill] {msg}\n")
 
 
-def _op_read(ref: str) -> str:
-    if not shutil.which("op"):
-        return ""
-    try:
-        out = subprocess.run(
-            ["op", "read", ref],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        return out.stdout.strip()
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        return ""
-
-
-def _r2_client():
-    access_key = os.environ.get("R2_TRANSCRIPTS_ACCESS_KEY_ID", "").strip()
-    secret_key = os.environ.get("R2_TRANSCRIPTS_SECRET_ACCESS_KEY", "").strip()
-    if not access_key or not secret_key:
-        raise RuntimeError(
-            "R2_TRANSCRIPTS_ACCESS_KEY_ID / R2_TRANSCRIPTS_SECRET_ACCESS_KEY missing"
-        )
-    endpoint = _op_read("op://COO/r2-transcripts/endpoint")
-    bucket = _op_read("op://COO/r2-transcripts/bucket")
-    if not endpoint or not bucket:
-        raise RuntimeError(
-            "R2 endpoint or bucket not readable from op://COO/r2-transcripts/{endpoint,bucket}"
-        )
-    import boto3
-    from botocore.config import Config
-
-    s3 = boto3.client(
-        "s3",
-        endpoint_url=endpoint,
-        aws_access_key_id=access_key,
-        aws_secret_access_key=secret_key,
-        region_name="auto",
-        config=Config(signature_version="s3v4", retries={"max_attempts": 3, "mode": "standard"}),
-    )
-    return s3, bucket
-
-
-def _list_sessions(s3, bucket: str, prefix: str, key_re: re.Pattern[str]) -> set[str]:
+def _list_sessions(prefix: str, key_re: re.Pattern[str], s3) -> set[str]:
     sids: set[str] = set()
-    paginator = s3.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        for obj in page.get("Contents", []) or []:
-            m = key_re.search(obj["Key"])
-            if m and SESSION_ID_RE.match(m.group(1)):
-                sids.add(m.group(1))
+    for obj in list_keys(prefix, s3=s3):
+        m = key_re.search(obj["key"])
+        if m and SESSION_ID_RE.match(m.group(1)):
+            sids.add(m.group(1))
     return sids
 
 
@@ -199,17 +160,19 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     try:
-        s3, bucket = _r2_client()
-    except RuntimeError as e:
+        coords = r2_coordinates()
+        s3 = r2_client(coords)
+    except R2Error as e:
         _stderr(str(e))
         return 1
+    bucket = coords.bucket
 
     _stderr(f"scanning r2://{bucket}/transcripts/ for ciphertext keys…")
-    exported = _list_sessions(s3, bucket, "transcripts/", CIPHERTEXT_KEY_RE)
+    exported = _list_sessions("transcripts/", CIPHERTEXT_KEY_RE, s3)
     _stderr(f"  {len(exported)} session(s) in archive")
 
     _stderr(f"scanning r2://{bucket}/{args.key_prefix}/ for existing renders…")
-    already_rendered = _list_sessions(s3, bucket, f"{args.key_prefix}/", RENDERED_KEY_RE)
+    already_rendered = _list_sessions(f"{args.key_prefix}/", RENDERED_KEY_RE, s3)
     _stderr(f"  {len(already_rendered)} already rendered")
 
     if args.include_existing:
