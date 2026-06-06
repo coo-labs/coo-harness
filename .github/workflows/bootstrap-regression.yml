@@ -286,5 +286,16 @@ jobs:
           pip install --quiet jsonschema pyyaml
           bash "$GITHUB_WORKSPACE/scripts/ci/test-integrity-group-s.sh"
 
-      - name: Track 4 schema-iterator — schema-fetch-secrets.py round-trip
-        run: bash "$GITHUB_WORKSPACE/scripts/ci/test-track4-schema-iterator.sh"
+      # test-track4-schema-iterator deliberately NOT wired here. Its
+      # assertions require a schema fixture whose credentials carry the
+      # production env_aliases (GITHUB_MCP_PAT, MEM0_API_KEY,
+      # TRANSCRIPTS_AGE_IDENTITY, etc.); the existing fixture at
+      # scripts/ci/fixtures/secrets-schema-clean.yaml uses synthetic
+      # credential names (test-github-pat / test-multi-field / test-
+      # dormant) shaped for test-integrity-group-s.sh's invariants. The
+      # schema iterator is exercised end-to-end by bootstrap-end-to-end
+      # via cloud-setup.sh -> fetch_coo_secrets -> schema-fetch-secrets
+      # .py -> settings.json.env; a broken iterator fails Group D's
+      # invariants. Direct contract testing (§5 fail-closed on invalid
+      # YAML, §6 fail-closed on missing schema) is filed as a follow-on
+      # under coo-memory#933.
