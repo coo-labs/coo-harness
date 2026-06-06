@@ -1,5 +1,5 @@
 {
-  "_comment": "Redaction patterns applied to Claude Code session transcripts before commit/upload. Order matters — longer/more-structured shapes first, prefixed shapes next, generic JWT, then entropy fallback. See coo-labs/coo-logs#64 design comment + security review.",
+  "_comment": "Redaction patterns applied to Claude Code session transcripts before commit/upload. Order matters — longer/more-structured shapes first, prefixed shapes next, generic JWT, then entropy fallback. Each pattern with a corresponding entry in coo-memory/operations/secrets/schema.yaml::secret_shapes carries a `schema_shape` cross-reference for drift detection (coo-labs/coo-harness#361). Defensive-only patterns (stripe / slack / hf / npm / pypi / gcp-refresh / generic auth-header / jwt) have no schema_shape because there's no corresponding VADE-vault credential. See coo-labs/coo-logs#64 design comment + security review.",
   "version": 1,
   "patterns": [
     {
@@ -21,6 +21,7 @@
       "regex": "\\bops_eyJ[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+){0,3}\\b",
       "replacement": "[REDACTED:op-token]",
       "secret_var": null,
+      "schema_shape": "op-service-account-token",
       "notes": "1Password service-account token. Defensive: the harness env carries OP_SERVICE_ACCOUNT_TOKEN at boot but fetch_coo_secrets does not re-export it (the harness owns it directly). Apply before generic JWT — ops_ prefix carries an embedded JWT-shaped payload that would otherwise match the JWT pattern."
     },
     {
@@ -28,6 +29,7 @@
       "regex": "\\bsk-ant-(?:api|admin|sid)\\d{2}-[A-Za-z0-9_-]{86,}\\b",
       "replacement": "[REDACTED:anthropic-key]",
       "secret_var": null,
+      "schema_shape": "anthropic-api-key",
       "notes": "Anthropic API keys. Critical class for a Claude-running shop. Pattern covers api/admin/sid variants with 2-digit version. Defensive: not currently in fetch_coo_secrets, but lands in transcripts via stray Bash output / WebFetch / colleague-paste paths."
     },
     {
@@ -35,6 +37,7 @@
       "regex": "\\bsk-(?:proj-)?[A-Za-z0-9_-]{40,}\\b",
       "replacement": "[REDACTED:openai-key]",
       "secret_var": null,
+      "schema_shape": "openai-api-key",
       "notes": "OpenAI API keys, current and project-scoped formats."
     },
     {
@@ -42,6 +45,7 @@
       "regex": "\\bgithub_pat_[A-Za-z0-9_]{82,}\\b",
       "replacement": "[REDACTED:gh-fine-pat]",
       "secret_var": ["GITHUB_MCP_PAT", "GITHUB_TOKEN"],
+      "schema_shape": "github-fine-grained-pat",
       "notes": "GitHub fine-grained PAT. 11-char prefix + 82 chars (verified against live PAT length 93). Spec is exact 82, but using {82,} so over-long anomalous strings (e.g. corpus typos, future format extensions) still redact rather than slip through into commit."
     },
     {
@@ -49,6 +53,7 @@
       "regex": "\\bghp_[A-Za-z0-9]{36}\\b",
       "replacement": "[REDACTED:gh-classic-pat]",
       "secret_var": "GITHUB_PUBLIC_PAT",
+      "schema_shape": "github-classic-pat",
       "notes": "GitHub classic PAT, 40 chars total. GITHUB_PUBLIC_PAT (MEMO-2026-05-11-6xv2) is exported under this shape; gh-coo-wrap routes cross-org public-repo writes through it."
     },
     {
@@ -56,6 +61,7 @@
       "regex": "\\bghu_[A-Za-z0-9]{36}\\b",
       "replacement": "[REDACTED:gh-oauth-u2s]",
       "secret_var": null,
+      "schema_shape": "github-app-user-token",
       "notes": "GitHub OAuth user-to-server token."
     },
     {
@@ -63,6 +69,7 @@
       "regex": "\\bghs_[A-Za-z0-9]{36}\\b",
       "replacement": "[REDACTED:gh-oauth-s2s]",
       "secret_var": null,
+      "schema_shape": "github-app-installation-token",
       "notes": "GitHub OAuth server-to-server token."
     },
     {
@@ -70,6 +77,7 @@
       "regex": "\\bghr_[A-Za-z0-9]{36}\\b",
       "replacement": "[REDACTED:gh-oauth-refresh]",
       "secret_var": null,
+      "schema_shape": "github-app-refresh-token",
       "notes": "GitHub OAuth refresh token."
     },
     {
@@ -77,21 +85,32 @@
       "regex": "\\bm0-[A-Za-z0-9]{40,}\\b",
       "replacement": "[REDACTED:mem0-key]",
       "secret_var": "MEM0_API_KEY",
+      "schema_shape": "mem0-api-key",
       "notes": "Mem0 API key. Live key length observed at 43 chars."
     },
     {
       "id": "agentmail-key",
-      "regex": "\\bagentmail[_-]?[A-Za-z0-9_-]{60,}\\b",
+      "regex": "\\bam_[A-Za-z0-9_]{20,}\\b",
       "replacement": "[REDACTED:agentmail-key]",
       "secret_var": "AGENTMAIL_API_KEY",
-      "notes": "AgentMail API key (length 76 per coo-bootstrap.sh). Prefix unverified — refine when shape known."
+      "schema_shape": "agentmail-api-key",
+      "notes": "AgentMail API key. Prefix `am_` verified against live key shape during coo-labs/coo-harness#361 audit (the previous `agentmail`-literal-prefix assumption never matched and silently leaked into 10 capture archives 2026-05-30). Length 76 per coo-bootstrap.sh; body `[A-Za-z0-9_]{20,}` is permissive to tolerate future format changes."
     },
     {
       "id": "cloudflare-api-token",
       "regex": "\\bcfat_[A-Za-z0-9_-]{40,}\\b",
       "replacement": "[REDACTED:cloudflare-api-token]",
       "secret_var": "CLOUDFLARE_API_TOKEN",
+      "schema_shape": "cloudflare-api-token",
       "notes": "Cloudflare Account-owned API token (cfat_ prefix; introduced ~2024). Live token observed at length 53 (cfat_ + 48 chars). MEMO-2026-05-09-vwk2."
+    },
+    {
+      "id": "cloudflare-tunnel-token",
+      "regex": "\\bcfut_[A-Za-z0-9]{40,}\\b",
+      "replacement": "[REDACTED:cloudflare-tunnel-token]",
+      "secret_var": null,
+      "schema_shape": "cloudflare-tunnel-token",
+      "notes": "Cloudflare Tunnel token (cfut_ prefix). Defensive — no current VADE consumer is of this shape; mirrors schema.yaml::secret_shapes for symmetry per coo-labs/coo-harness#361."
     },
     {
       "id": "cloudflare-account-id",
@@ -175,6 +194,7 @@
       "regex": "AGE-SECRET-KEY-1[A-Z0-9]{50,80}",
       "replacement": "[REDACTED:age-identity]",
       "secret_var": "TRANSCRIPTS_AGE_IDENTITY",
+      "schema_shape": "age-secret-key",
       "notes": "age X25519 private identity (Bech32-encoded, uppercase). Prefix is the literal `AGE-SECRET-KEY-1`, body is 58-char Bech32 in practice; range 50–80 tolerates format extension. High false-positive resistance — the prefix is unique. Used by the Stage-1 transcript-analyzer (Batch 3 of coo-labs/coo-logs#64) to decrypt R2-stored transcripts."
     },
     {
@@ -182,6 +202,7 @@
       "regex": "\\bAKIA[A-Z0-9]{16}\\b",
       "replacement": "[REDACTED:aws-akid]",
       "secret_var": null,
+      "schema_shape": "aws-access-key-id",
       "notes": "AWS access-key id, 20 chars. Defensive — does NOT cover Cloudflare R2 access key IDs (R2 uses 32-char hex, not AKIA-prefix); see r2-access-key-id."
     },
     {
@@ -193,17 +214,17 @@
     },
     {
       "id": "r2-access-key-id",
-      "regex": "(?i)((?:R2_TRANSCRIPTS_ACCESS_KEY_ID|AWS_ACCESS_KEY_ID)\\s*[=:]\\s*['\"]?)[a-fA-F0-9]{32}",
-      "replacement": "\\g<1>[REDACTED:r2-access-key]",
+      "regex": "(?i)((?:R2_TRANSCRIPTS_ACCESS_KEY_ID|AWS_ACCESS_KEY_ID)(?:\\\\?[\"'])?\\s*[=:]\\s*(?:\\\\?['\"])?)[a-fA-F0-9]{32}",
+      "replacement": "\\g<1>[REDACTED:r2-access-key-id]",
       "secret_var": "R2_TRANSCRIPTS_ACCESS_KEY_ID",
-      "notes": "Cloudflare R2 access key ID — 32-char hex (no AKIA prefix despite S3 compatibility). Shapeless in isolation (matches every git SHA / MD5), so kv-anchored to its env-var name. R2_TRANSCRIPTS_ACCESS_KEY_ID is the canonical export from fetch_coo_secrets; AWS_ACCESS_KEY_ID alias because the export hook re-maps R2_TRANSCRIPTS_* into AWS_* for boto3 at run time."
+      "notes": "Cloudflare R2 access key ID — 32-char hex (no AKIA prefix despite S3 compatibility). Shapeless in isolation (matches every git SHA / MD5), so kv-anchored to its env-var name. The `(?:\\\\?[\"'])?` groups around the var name let the pattern match the JSON form `\"NAME\": \"val\"` as well as the env-assignment form `NAME=val` / `NAME: val`; the `\\\\?` tolerates the JSON-escaped form `\\\"NAME\\\": \\\"val\\\"` produced when settings.json content is captured into a tool_response field and re-serialized via json.dumps (coo-labs/coo-harness#361 found settings.json captures with both forms bypassing the original name-anchor). R2_TRANSCRIPTS_ACCESS_KEY_ID is the canonical export from fetch_coo_secrets; AWS_ACCESS_KEY_ID alias because the export hook re-maps R2_TRANSCRIPTS_* into AWS_* for boto3 at run time. No schema_shape — the 32-char hex form is not in schema.yaml::secret_shapes (the related aws-access-key-id entry covers only AKIA shape); the structural follow-up to extend S7 invariant probing to op_alt_fields is tracked at coo-labs/coo-memory#1198."
     },
     {
       "id": "r2-secret-access-key",
-      "regex": "(?i)((?:R2_TRANSCRIPTS_SECRET_ACCESS_KEY|AWS_SECRET_ACCESS_KEY)\\s*[=:]\\s*['\"]?)[a-fA-F0-9]{64}",
-      "replacement": "\\g<1>[REDACTED:r2-secret-key]",
+      "regex": "(?i)((?:R2_TRANSCRIPTS_SECRET_ACCESS_KEY|AWS_SECRET_ACCESS_KEY)(?:\\\\?[\"'])?\\s*[=:]\\s*(?:\\\\?['\"])?)[a-fA-F0-9]{64}",
+      "replacement": "\\g<1>[REDACTED:r2-secret-access-key]",
       "secret_var": "R2_TRANSCRIPTS_SECRET_ACCESS_KEY",
-      "notes": "Cloudflare R2 secret access key — 64-char hex (SHA-256-derived). Same kv-anchoring rationale as r2-access-key-id; the existing aws-secret pattern (40-char base64) does not cover R2."
+      "notes": "Cloudflare R2 secret access key — 64-char hex (SHA-256-derived). Same kv-anchoring rationale as r2-access-key-id; the existing aws-secret pattern (40-char base64) does not cover R2. JSON-form alternation added 2026-06-06 per coo-labs/coo-harness#361. No schema_shape — schema.yaml::secret_shapes has no 64-char-hex entry."
     },
     {
       "id": "vade-auth-token",

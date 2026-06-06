@@ -73,7 +73,33 @@ def _mem0_key() -> str:
 
 
 def _agentmail_key() -> str:
-    return "agentmail" + "-" + _A(76)
+    # Real AgentMail shape: `am_` prefix + body (~73 chars in practice).
+    # The previous `"agentmail" + "-" + ...` shape was wrong — the
+    # corresponding regex never matched live keys; three secrets leaked
+    # into capture archives 2026-05-30 (coo-labs/coo-harness#361).
+    return "am" + "_" + _A(73)
+
+
+def _r2_access_key_id_env() -> str:
+    # env-assignment form: NAME=val
+    return "R2_TRANSCRIPTS_ACCESS_KEY_ID" + "=" + ("a" * 32)
+
+
+def _r2_access_key_id_json() -> str:
+    # JSON form: "NAME": "val" — the form that bypassed redaction in #361.
+    return '"R2_TRANSCRIPTS_ACCESS_KEY_ID"' + ": " + '"' + ("a" * 32) + '"'
+
+
+def _r2_secret_access_key_env() -> str:
+    return "R2_TRANSCRIPTS_SECRET_ACCESS_KEY" + "=" + ("a" * 64)
+
+
+def _r2_secret_access_key_json() -> str:
+    return '"R2_TRANSCRIPTS_SECRET_ACCESS_KEY"' + ": " + '"' + ("a" * 64) + '"'
+
+
+def _cloudflare_tunnel_token() -> str:
+    return "cfut" + "_" + _A(48)
 
 
 def _op_token() -> str:
@@ -159,6 +185,11 @@ POSITIVE_CASES: list[tuple[str, callable, str]] = [
     ("openai-key", _openai_key, "leaked into Bash output"),
     ("mem0-key", _mem0_key, "in env-snapshot"),
     ("agentmail-key", _agentmail_key, "agentmail key dump"),
+    ("r2-access-key-id", _r2_access_key_id_env, "R2 access key id env-assignment form"),
+    ("r2-access-key-id", _r2_access_key_id_json, "R2 access key id JSON form (settings.json case)"),
+    ("r2-secret-access-key", _r2_secret_access_key_env, "R2 secret access key env-assignment form"),
+    ("r2-secret-access-key", _r2_secret_access_key_json, "R2 secret access key JSON form"),
+    ("cloudflare-tunnel-token", _cloudflare_tunnel_token, "Cloudflare Tunnel token"),
     ("op-token", _op_token, "1Password service token"),
     ("jwt", _generic_jwt, "a JWT in a tool result"),
     ("aws-akid", _aws_akid, "AWS access key in stdout"),
