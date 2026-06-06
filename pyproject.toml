@@ -48,6 +48,13 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "lib/transcripts/tests/*" = ["PLR2004"]  # magic-value checks fire constantly in tests
+"lib/transcripts/render.py" = [
+    "PLR0912",  # render_html + compute_metadata branch on every entry-kind by design
+    "PLR0915",  # same: rendering pipelines are inherently statement-heavy
+    "E501",    # session_url chrome line in render_html is long because the f-string
+               # builds two anchor tags inline; split would obscure parity vs the
+               # script's original shape (coo-memory#1147)
+]
 
 [tool.mypy]
 python_version = "3.10"
