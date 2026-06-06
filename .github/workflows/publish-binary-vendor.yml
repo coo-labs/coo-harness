@@ -18,11 +18,13 @@ name: Publish binary vendor bundle
 # PAT-already-authenticated, snapshot-cache compatible) all hold for
 # release assets without the daemon dependency.
 #
-# The same Dockerfile install steps are replicated here (in an Ubuntu
-# container, no docker-in-docker required) with absolute target paths
-# matching production layout (/home/user/.local/...), so mem0-mcp-server's
-# uv-managed venv shebangs resolve unchanged when the bundle is untarred
-# at cloud-setup.sh time.
+# The install steps that previously lived in a Dockerfile run here in
+# an Ubuntu container (no docker-in-docker required) with absolute
+# target paths matching production layout (/home/user/.local/...), so
+# mem0-mcp-server's uv-managed venv shebangs resolve unchanged when the
+# bundle is untarred at cloud-setup.sh time. The Dockerfile was removed
+# (the snapshot build no longer goes through docker); this workflow now
+# owns the canonical install recipe.
 #
 # Tag scheme: binary-vendor-<short-sha> per-build + binary-vendor-latest
 # moving tag for cloud-setup.sh to fetch. SHA256 of the bundle is
@@ -33,7 +35,6 @@ on:
   push:
     branches: [main]
     paths:
-      - 'Dockerfile'
       - 'versions.lock'
       - '.github/workflows/publish-binary-vendor.yml'
   workflow_dispatch:
