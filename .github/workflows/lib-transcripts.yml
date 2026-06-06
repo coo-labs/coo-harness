@@ -5,7 +5,11 @@ on:
     paths:
       - "lib/transcripts/**"
       - "scripts/transcript-render-backfill.py"
+      - "scripts/transcript-url-backfill.py"
+      - "scripts/transcript-rerender-v3-backfill.py"
       - "scripts/ci/test-transcript-render-backfill.py"
+      - "scripts/ci/test-transcript-url-backfill.py"
+      - "scripts/ci/test-transcript-rerender-v3-backfill.py"
       - "scripts/ci/test-lib-transcripts-parity.py"
       - "pyproject.toml"
       - ".github/workflows/lib-transcripts.yml"
@@ -14,7 +18,11 @@ on:
     paths:
       - "lib/transcripts/**"
       - "scripts/transcript-render-backfill.py"
+      - "scripts/transcript-url-backfill.py"
+      - "scripts/transcript-rerender-v3-backfill.py"
       - "scripts/ci/test-transcript-render-backfill.py"
+      - "scripts/ci/test-transcript-url-backfill.py"
+      - "scripts/ci/test-transcript-rerender-v3-backfill.py"
       - "scripts/ci/test-lib-transcripts-parity.py"
       - "pyproject.toml"
       - ".github/workflows/lib-transcripts.yml"
@@ -53,3 +61,9 @@ jobs:
 
       - name: ported-script smoke (transcript-render-backfill)
         run: python3 scripts/ci/test-transcript-render-backfill.py
+
+      - name: ported-script smoke (transcript-url-backfill)
+        run: python3 scripts/ci/test-transcript-url-backfill.py
+
+      - name: ported-script smoke (transcript-rerender-v3-backfill)
+        run: python3 scripts/ci/test-transcript-rerender-v3-backfill.py

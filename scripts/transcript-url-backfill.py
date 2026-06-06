@@ -75,7 +75,6 @@ import datetime as _dt
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 from collections import Counter
@@ -86,6 +85,23 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 FETCH_SH = SCRIPT_DIR / "lib" / "transcript-fetch.sh"
 RENDER_PY = SCRIPT_DIR / "lifecycle" / "session-end-transcript-render.py"
 SESSION_URL_PREFIX = "https://claude.ai/code/session_"
+
+# Locate coo-harness/lib/ on sys.path so `from transcripts import ...` resolves
+# under the uv-run venv this script spawns into. See lib/transcripts/README.md
+# §"Importing" for the parents[N] table; this script lives at scripts/<top>.py
+# so parents[1] is the repo root.
+sys.path.insert(0, str(SCRIPT_DIR.parent / "lib"))
+
+from transcripts import (  # noqa: E402
+    AUTHORITATIVE_URL_SOURCES,
+    RECONCILE_ELIGIBLE_URL_SOURCES,
+    VALID_URL_SOURCES,
+    R2Error,
+    dominant_scan_source,
+    list_keys,
+    r2_client,
+    r2_coordinates,
+)
 
 SESSION_ID_RE = re.compile(
     r"^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$"
@@ -123,109 +139,16 @@ REPO_RENAME = {
     "vade-app/vade-governance": "coo-labs/vade-governance",
 }
 
-# ---------------------------------------------------------------------------
-# url_source taxonomy — briefing 039 Phase 3.
-#
-# Every sidecar that carries a populated session_url also carries a
-# url_source tag that names which signal class produced it. The taxonomy
-# splits into two reconcile classes:
-#
-#   AUTHORITATIVE — the URL came from a strong-signal path that's
-#     considered ground-truth. A reconcile pass must never overwrite
-#     a sidecar whose existing url_source is in this set. Includes:
-#       title-fast-path     — coo-logs auto-meta-PR title carried the
-#                             remote-session-id
-#       html-extract        — operator extracted the URL out of the
-#                             rendered HTML body (manual recovery)
-#       env-recovery        — renderer's path-1 (env match) fired
-#       export-meta-fallback — renderer's path-2 (R2 export-meta) fired
-#
-#   RECONCILE_ELIGIBLE — the URL came from a scan-of-the-transcript
-#     signal. These can be overwritten by a stronger signal of the
-#     same or a different class. Includes:
-#       scan-pr-link        — top-level type='pr-link' entry hit
-#       scan-tool-result    — a tool_result body contained an exact
-#                             github.com/.../pull|issues/N URL
-#       scan-pattern-a      — a literal session URL was observed in
-#                             the transcript text
-#       scan-prose-vote     — only prose PR/issue mentions voted for
-#                             this URL (no direct signal)
-#
-# _patch_one enforces the AUTHORITATIVE preservation rule. Any new
-# mass-mutation script must respect the same boundary; see briefing
-# 039 *Constraints* §"Never automatically clear a session_url whose
-# url_source is …".
-AUTHORITATIVE_URL_SOURCES = frozenset({
-    "title-fast-path",
-    "html-extract",
-    "env-recovery",
-    "export-meta-fallback",
-    "claudeai-events-uuid",
-})
-RECONCILE_ELIGIBLE_URL_SOURCES = frozenset({
-    "scan-pr-link",
-    "scan-tool-result",
-    "scan-pattern-a",
-    "scan-prose-vote",
-})
-VALID_URL_SOURCES = AUTHORITATIVE_URL_SOURCES | RECONCILE_ELIGIBLE_URL_SOURCES
-
-
-def _dominant_scan_source(parts: dict[str, int]) -> str:
-    """Pick the canonical scan-* source for a URL given its signal breakdown.
-
-    Priority: pr_link > tool_result_exact > pattern_a > prose_*."""
-    if parts.get("pr_link", 0) > 0:
-        return "scan-pr-link"
-    if parts.get("tool_result_exact", 0) > 0:
-        return "scan-tool-result"
-    if parts.get("pattern_a", 0) > 0:
-        return "scan-pattern-a"
-    return "scan-prose-vote"
+# url_source taxonomy lives in lib/transcripts/provenance.py and is imported
+# above (AUTHORITATIVE_URL_SOURCES, RECONCILE_ELIGIBLE_URL_SOURCES,
+# VALID_URL_SOURCES, dominant_scan_source). _patch_one enforces the
+# AUTHORITATIVE preservation rule. Any new mass-mutation script must respect
+# the same boundary; see briefing 039 *Constraints* §"Never automatically
+# clear a session_url whose url_source is …".
 
 
 def _stderr(msg: str) -> None:
     sys.stderr.write(f"[transcript-url-backfill] {msg}\n")
-
-
-def _op_read(ref: str) -> str:
-    if not shutil.which("op"):
-        return ""
-    try:
-        out = subprocess.run(
-            ["op", "read", ref],
-            check=True, capture_output=True, text=True, timeout=10,
-        )
-        return out.stdout.strip()
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        return ""
-
-
-def _r2_client():
-    access_key = os.environ.get("R2_TRANSCRIPTS_ACCESS_KEY_ID", "").strip()
-    secret_key = os.environ.get("R2_TRANSCRIPTS_SECRET_ACCESS_KEY", "").strip()
-    if not access_key or not secret_key:
-        raise RuntimeError(
-            "R2_TRANSCRIPTS_ACCESS_KEY_ID / R2_TRANSCRIPTS_SECRET_ACCESS_KEY missing"
-        )
-    endpoint = _op_read("op://COO/r2-transcripts/endpoint")
-    bucket = _op_read("op://COO/r2-transcripts/bucket")
-    if not endpoint or not bucket:
-        raise RuntimeError(
-            "R2 endpoint or bucket not readable from op://COO/r2-transcripts/{endpoint,bucket}"
-        )
-    import boto3
-    from botocore.config import Config
-
-    s3 = boto3.client(
-        "s3",
-        endpoint_url=endpoint,
-        aws_access_key_id=access_key,
-        aws_secret_access_key=secret_key,
-        region_name="auto",
-        config=Config(signature_version="s3v4", retries={"max_attempts": 3, "mode": "standard"}),
-    )
-    return s3, bucket
 
 
 def _load_session_artifacts_index() -> dict:
@@ -273,23 +196,21 @@ def _list_candidate_sidecars(
 ) -> list[tuple[str, str]]:
     """Return [(sid, r2_key), ...] for sidecars eligible for patching."""
     cands: list[tuple[str, str]] = []
-    paginator = s3.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=bucket, Prefix=f"{key_prefix}/"):
-        for obj in page.get("Contents", []) or []:
-            key = obj["Key"]
-            m = RENDERED_KEY_RE.search(key)
-            if not m or not SESSION_ID_RE.match(m.group(1)):
-                continue
-            sid = m.group(1)
-            try:
-                body = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
-                meta = json.loads(body)
-            except Exception as e:
-                _stderr(f"  skip {sid}: failed to read sidecar: {e}")
-                continue
-            if meta.get("session_url") and not include_populated:
-                continue
-            cands.append((sid, key))
+    for obj in list_keys(f"{key_prefix}/", s3=s3):
+        key = obj["key"]
+        m = RENDERED_KEY_RE.search(key)
+        if not m or not SESSION_ID_RE.match(m.group(1)):
+            continue
+        sid = m.group(1)
+        try:
+            body = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+            meta = json.loads(body)
+        except Exception as e:
+            _stderr(f"  skip {sid}: failed to read sidecar: {e}")
+            continue
+        if meta.get("session_url") and not include_populated:
+            continue
+        cands.append((sid, key))
     return cands
 
 
@@ -593,7 +514,7 @@ def _scan_jsonl_for_url(
         return url, (
             f"direct authorship ({dscore}pt direct / {tscore}pt total; "
             f"{parts_str}; runner-up direct={runner_d}pt){prune_note}"
-        ), _dominant_scan_source(parts)
+        ), dominant_scan_source(parts)
 
     top = votes.most_common(2)
     top_url, top_score = top[0]
@@ -610,11 +531,11 @@ def _scan_jsonl_for_url(
     if top_score < floor:
         return None, f"too weak ({top_score}pt vs floor {floor}; {parts_str}){prune_note}", None
     if runner_score == 0:
-        return top_url, f"unanimous ({top_score}pt: {parts_str}){prune_note}", _dominant_scan_source(parts)
+        return top_url, f"unanimous ({top_score}pt: {parts_str}){prune_note}", dominant_scan_source(parts)
     if top_score >= 2 * runner_score:
         return top_url, (
             f"strong mode ({top_score}pt vs {runner_score}pt 2nd; {parts_str}){prune_note}"
-        ), _dominant_scan_source(parts)
+        ), dominant_scan_source(parts)
     return None, (
         f"conflict (top {top_score}pt vs 2nd {runner_score}pt; "
         f"top3={votes.most_common(3)}){prune_note}"
@@ -833,10 +754,12 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     try:
-        s3, bucket = _r2_client()
-    except RuntimeError as e:
+        coords = r2_coordinates()
+        s3 = r2_client(coords)
+    except R2Error as e:
         _stderr(str(e))
         return 1
+    bucket = coords.bucket
 
     _stderr("loading coo-labs/coo-logs/index/session_artifacts.json…")
     try:
