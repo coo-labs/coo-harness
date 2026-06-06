@@ -344,7 +344,34 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--context", type=int, default=5)
     x.set_defaults(func=cmd_excerpt)
 
+    h = sub.add_parser("help", help="Show top-level help, or help for a subcommand.")
+    h.add_argument("topic", nargs="?",
+                   help="Subcommand name (sessions, tool-calls, files, "
+                        "artifacts, errors, excerpt). Omit for the top-level help.")
+    h.set_defaults(func=cmd_help)
+
     return p
+
+
+def cmd_help(args: argparse.Namespace) -> int:
+    parser = build_parser()
+    if not args.topic:
+        parser.print_help()
+        return 0
+    # Walk the subparsers action to find the named topic.
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            sub_parser = action.choices.get(args.topic)
+            if sub_parser is None:
+                sys.stderr.write(
+                    f"coo-search: unknown subcommand '{args.topic}'. "
+                    f"Known: {', '.join(sorted(action.choices))}\n"
+                )
+                return 2
+            sub_parser.print_help()
+            return 0
+    parser.print_help()
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
