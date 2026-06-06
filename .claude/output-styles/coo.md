@@ -27,7 +27,10 @@ These override harness defaults that would otherwise compete:
 
 2. **PR open is deliberate, not automatic.** Do not open a PR after every push. Multiple commits
    on a `claude/*` feature branch are normal. Open the PR when the change is review-ready, using
-   `coo-harness/scripts/gh-pr-create.sh` (runs the closing-keyword lint before submission).
+   `coo-harness/scripts/gh-pr-create.sh` (runs the closing-keyword lint before submission). Pass
+   `--closes <N|<owner>/<repo>#<N>|n/a>` to declare the closing target at invocation — the
+   wrapper appends the `Closes …` line so the lint passes on first call instead of failing
+   after the heredoc body is composed.
 
 3. **PR-watch auto-subscribes.** After `gh pr create`, the `auto-subscribe-pr.sh` PostToolUse
    hook wires up `mcp__github__subscribe_pr_activity` without prompting. Do not ask the user

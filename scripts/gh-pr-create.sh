@@ -18,7 +18,19 @@
 # rule (G1 fast-feedback, retirement criterion (d) defense-in-depth-perpetual;
 # coo-memory#1016, ci-strategy.md).
 #
-# Usage: identical to `gh pr create`. Adds one flag (with one back-compat alias):
+# Usage: identical to `gh pr create`. Adds two flags (plus one back-compat alias):
+#   --closes <N|owner/repo#N|n/a>   Append a closing-keyword line to the body
+#                                   (e.g. `--closes 1234` -> `Closes #1234`,
+#                                   `--closes coo-labs/coo-memory#42` ->
+#                                   `Closes coo-labs/coo-memory#42`,
+#                                   `--closes n/a` -> `Closes: n/a`). Lets
+#                                   callers declare what the PR resolves at
+#                                   invocation time, so the closing-keyword
+#                                   check passes without rewriting the body
+#                                   after lint discovery. If the body already
+#                                   carries a closing keyword the flag is
+#                                   additive (both lines render); the lint
+#                                   accepts either.
 #   --skip-hygiene-check            Bypass all three checks. Use only when the
 #   --skip-closing-keyword-check    workflow's exempt-class registry covers
 #                                   your case (see operations/issue-pr-hygiene.md
@@ -34,6 +46,7 @@ set -eu
 title=""
 body=""
 body_file=""
+closes_val=""
 skip_check=0
 pass_args=()
 
@@ -41,6 +54,18 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --skip-hygiene-check|--skip-closing-keyword-check)
       skip_check=1
+      shift
+      ;;
+    --closes)
+      if [ $# -lt 2 ]; then
+        echo "gh-pr-create: --closes requires a value (N | owner/repo#N | n/a)" >&2
+        exit 2
+      fi
+      closes_val="$2"
+      shift 2
+      ;;
+    --closes=*)
+      closes_val="${1#--closes=}"
       shift
       ;;
     --title)
@@ -55,22 +80,18 @@ while [ $# -gt 0 ]; do
       ;;
     --body)
       body="$2"
-      pass_args+=("$1" "$2")
       shift 2
       ;;
     --body=*)
       body="${1#--body=}"
-      pass_args+=("$1")
       shift
       ;;
     --body-file)
       body_file="$2"
-      pass_args+=("$1" "$2")
       shift 2
       ;;
     --body-file=*)
       body_file="${1#--body-file=}"
-      pass_args+=("$1")
       shift
       ;;
     *)
@@ -79,6 +100,68 @@ while [ $# -gt 0 ]; do
       ;;
   esac
 done
+
+# Resolve body content from --body or --body-file. Done before the cloud-proxy
+# block and the skip / session exec paths so a single re-injection of the
+# possibly-augmented body into pass_args covers every downstream branch.
+resolved_body=""
+if [ -n "$body" ]; then
+  resolved_body="$body"
+elif [ -n "$body_file" ]; then
+  if [ "$body_file" = "-" ]; then
+    echo "gh-pr-create: --body-file - (stdin) not supported by the lint;" >&2
+    echo "  use --body, a real file path, or --skip-hygiene-check." >&2
+    exit 2
+  fi
+  if [ ! -f "$body_file" ]; then
+    echo "gh-pr-create: --body-file '$body_file' not found" >&2
+    exit 2
+  fi
+  resolved_body="$(cat "$body_file")"
+fi
+
+# Process --closes: validate the value, build the closing-keyword line, append
+# to the body. Lets callers declare the closes target at invocation time so the
+# closing-keyword check passes without retry. Body-side `Closes …` keeps working
+# unchanged for callers that prefer to embed it themselves.
+if [ -n "$closes_val" ]; then
+  closes_line=""
+  case "$closes_val" in
+    n/a|N/A|n/A|N/a)
+      closes_line="Closes: n/a"
+      ;;
+    *)
+      if [[ "$closes_val" =~ ^#?[0-9]+$ ]]; then
+        closes_line="Closes #${closes_val#\#}"
+      elif [[ "$closes_val" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]+$ ]]; then
+        closes_line="Closes ${closes_val}"
+      else
+        cat >&2 <<EOF
+gh-pr-create: --closes value '${closes_val}' is malformed.
+
+Expected one of:
+    --closes <N>                        same-repo, e.g. --closes 1234
+    --closes <owner>/<repo>#<N>         cross-repo, e.g. --closes coo-labs/coo-memory#1234
+    --closes n/a                        no issue resolved
+EOF
+        exit 2
+      fi
+      ;;
+  esac
+
+  if [ -n "$resolved_body" ]; then
+    resolved_body="${resolved_body}"$'\n\n'"${closes_line}"
+  else
+    resolved_body="${closes_line}"
+  fi
+fi
+
+# Re-inject --body into pass_args. Skipped when no body input was supplied so
+# the empty-body path still picks up .github/PULL_REQUEST_TEMPLATE.md (gh only
+# loads the template when neither --body nor --body-file is present on argv).
+if [ -n "$body" ] || [ -n "$body_file" ] || [ -n "$closes_val" ]; then
+  pass_args+=("--body" "$resolved_body")
+fi
 
 # Cloud-session compatibility (coo-labs/coo-memory#703, coo-memory#898). In cloud
 # sandboxes the git remote is a local-proxy URL of the form
@@ -134,23 +217,9 @@ if [[ "$title" == session:* ]]; then
   exec gh pr create "${pass_args[@]}"
 fi
 
-# Resolve body content for the checks. Title + body together, mirroring
-# the workflow's title-OR-body matching.
-resolved_body=""
-if [ -n "$body" ]; then
-  resolved_body="$body"
-elif [ -n "$body_file" ]; then
-  if [ "$body_file" = "-" ]; then
-    echo "gh-pr-create: --body-file - (stdin) not supported by the lint;" >&2
-    echo "  use --body, a real file path, or --skip-hygiene-check." >&2
-    exit 2
-  fi
-  if [ ! -f "$body_file" ]; then
-    echo "gh-pr-create: --body-file '$body_file' not found" >&2
-    exit 2
-  fi
-  resolved_body="$(cat "$body_file")"
-fi
+# Title + body together, mirroring the workflow's title-OR-body matching.
+# resolved_body is set above (possibly with a `Closes …` line appended from
+# --closes).
 content="$title"$'\n'"$resolved_body"
 
 # Check 1 — Closing-keyword regex (mirrors issue-pr-hygiene-reusable.yml
@@ -167,11 +236,15 @@ else
   cat >&2 <<'EOF'
 gh-pr-create: closing-keyword check FAILED.
 
-The PR body must include one of:
+Declare the closes target at invocation with --closes:
 
-    Closes #N                           (same-repo issue)
-    Closes coo-labs/<repo>#N            (cross-repo issue)
-    Closes: n/a                         (no issue resolved)
+    --closes <N>                        same-repo, appends `Closes #N`
+    --closes <owner>/<repo>#<N>         cross-repo, appends `Closes <owner>/<repo>#<N>`
+    --closes n/a                        no issue resolved, appends `Closes: n/a`
+
+Or embed one of these lines in --body / --body-file directly:
+
+    Closes #N                |    Closes coo-labs/<repo>#N    |    Closes: n/a
 
 The CI workflow `closing-keywords` will block merge without it. This
 lint runs locally because the PR template at
