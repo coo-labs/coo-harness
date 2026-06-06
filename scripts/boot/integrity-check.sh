@@ -1061,6 +1061,16 @@ if [ -d "$F_REPO/.git" ] && check_cmd git; then
   f1_bad=()
   # List commit SHAs touching F1 scope since F_CUTOFF; body inspection
   # happens per-commit. --name-only with --format gives sha-then-paths.
+  #
+  # --min-parents=1 skips parent-less commits. In cloud-container shallow
+  # clones (every Claude Code on the web boot), the most-recent merged
+  # commit lands as the shallow boundary and reports as a root commit;
+  # `git show --name-only` on it reports the entire tree as "touched",
+  # producing a structural F1 false-positive every boot. Real F1 scope
+  # is the per-commit diff, so a no-parent commit can't legitimately be
+  # decision-bearing under this invariant; skipping the boundary recovers
+  # canonical-history semantics on shallow checkouts without weakening
+  # the rule on the full-history reviewer's repo.
   while IFS= read -r sha; do
     [ -n "$sha" ] || continue
     # Paths this commit touched that are in scope.
@@ -1080,7 +1090,7 @@ if [ -d "$F_REPO/.git" ] && check_cmd git; then
       [ "$allowed" -eq 1 ] && continue
       f1_bad+=("${sha:0:10}")
     fi
-  done < <(git -C "$F_REPO" log --since="$F_CUTOFF_GIT" --format='%H' 2>/dev/null)
+  done < <(git -C "$F_REPO" log --since="$F_CUTOFF_GIT" --min-parents=1 --format='%H' 2>/dev/null)
 
   if [ "$f1_total" -eq 0 ]; then
     _add F1 true "no decision-bearing commits since $F_CUTOFF_GIT (nothing to check)"
