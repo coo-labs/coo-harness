@@ -44,7 +44,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from transcripts.r2 import _bucket_from_env_or_op, list_keys, r2_client, read_sidecar
+from transcripts.r2 import list_keys, r2_client, read_sidecar
 
 if TYPE_CHECKING:
     from mypy_boto3_s3.client import S3Client
@@ -287,7 +287,6 @@ def compute_snapshot(
 def take_snapshot(
     s3: S3Client | None = None,
     *,
-    bucket: str | None = None,
     now: datetime | None = None,
     read_sidecars: bool = True,
 ) -> tuple[R2Snapshot, CohortAssignment]:
@@ -297,6 +296,10 @@ def take_snapshot(
     `read_sidecars=True`, GETs each `rendered/<sid>.meta.json` to capture
     the url_source distribution.
 
+    Bucket coordinates are resolved by `list_keys` and `read_sidecar`
+    internally — both call the package's `_bucket_from_env_or_op` helper,
+    so no bucket-name parameter on `take_snapshot` itself.
+
     Production paging cost: at the parent issue's 2026-06-01 measurements
     (~329 ciphertexts + ~519 rendered objects), this is ~5 list pages and
     ~240 sidecar reads — well within Worker / scheduled-task budgets, but
@@ -305,8 +308,6 @@ def take_snapshot(
     """
     if s3 is None:
         s3 = r2_client()
-    if bucket is None:
-        bucket = _bucket_from_env_or_op()
 
     ciphertext_objs = list_keys(CIPHERTEXT_PREFIX, s3=s3)
     rendered_objs = list_keys(RENDERED_PREFIX, s3=s3)

@@ -470,7 +470,7 @@ class TestTakeSnapshot:
             "rendered/c.meta.json": json.dumps({"url_source": "html-extract"}).encode(),
         }
         client = FakeS3Client(objs)
-        with patch("transcripts.state._bucket_from_env_or_op", return_value="bkt"):
+        with patch("transcripts.r2._bucket_from_env_or_op", return_value="bkt"):
             snap, assignment = take_snapshot(s3=_s3(client), now=FIXED_NOW)
         assert snap.session_count == 3
         assert snap.counts_by_artifact == {"ciphertext": 2, "html": 2, "sidecar": 2}
@@ -489,7 +489,7 @@ class TestTakeSnapshot:
             "rendered/a.meta.json": json.dumps({"url_source": "title-fast-path"}).encode(),
         }
         client = FakeS3Client(objs)
-        with patch("transcripts.state._bucket_from_env_or_op", return_value="bkt"):
+        with patch("transcripts.r2._bucket_from_env_or_op", return_value="bkt"):
             snap, _ = take_snapshot(s3=_s3(client), now=FIXED_NOW, read_sidecars=False)
         assert snap.url_source_counts == {}
         assert client.gets == []
@@ -501,15 +501,15 @@ class TestTakeSnapshot:
             "transcripts/2026/06/06/good.jsonl.gz.age": b"x",
         }
         client = FakeS3Client(objs)
-        with patch("transcripts.state._bucket_from_env_or_op", return_value="bkt"):
+        with patch("transcripts.r2._bucket_from_env_or_op", return_value="bkt"):
             snap, _ = take_snapshot(s3=_s3(client), now=FIXED_NOW, read_sidecars=False)
         assert snap.session_count == 1
         assert snap.counts_by_artifact == {"ciphertext": 1, "html": 0, "sidecar": 0}
 
-    def test_explicit_bucket_skips_op_read(self) -> None:
+    def test_empty_r2_produces_zero_snapshot(self) -> None:
         objs: dict[str, bytes] = {}
         client = FakeS3Client(objs)
-        with patch("transcripts.state._bucket_from_env_or_op") as op_read:
-            snap, _ = take_snapshot(s3=_s3(client), bucket="explicit", now=FIXED_NOW)
-        op_read.assert_not_called()
+        with patch("transcripts.r2._bucket_from_env_or_op", return_value="bkt"):
+            snap, assignment = take_snapshot(s3=_s3(client), now=FIXED_NOW)
         assert snap.session_count == 0
+        assert assignment.by_sid == {}
