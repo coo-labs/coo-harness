@@ -92,5 +92,5 @@ jobs:
       - name: ported-script smoke (session-end-transcript-render)
         run: python3 scripts/ci/test-session-end-transcript-render.py
 
-      - name: ported-script smoke (r2-mop-up: e6/e8 + list-r2-transcripts + meta-backfill)
+      - name: "ported-script smoke (r2-mop-up: e6/e8 + list-r2-transcripts + meta-backfill)"
         run: python3 scripts/ci/test-r2-mop-up-ports.py
