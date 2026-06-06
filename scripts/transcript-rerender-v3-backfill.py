@@ -32,12 +32,17 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
-import os
 import sys
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 BACKFILL_PY = SCRIPT_DIR / "transcript-url-backfill.py"
+
+# Locate coo-harness/lib/ on sys.path so `from transcripts import ...` resolves
+# under the uv-run venv this script spawns into.
+sys.path.insert(0, str(SCRIPT_DIR.parent / "lib"))
+
+from transcripts import R2Error, list_keys, r2_client, r2_coordinates  # noqa: E402
 
 
 def _stderr(msg: str) -> None:
@@ -45,6 +50,11 @@ def _stderr(msg: str) -> None:
 
 
 def _load_backfill_module():
+    """Load transcript-url-backfill.py as a module so we can call
+    `_rerender_one` directly. The rerender helper is orchestration (subprocess
+    + R2 writes) and stays in scripts/ per the lib README's primitive/
+    orchestration split; we keep importing it through importlib because the
+    hyphenated filename isn't a valid Python module name."""
     spec = importlib.util.spec_from_file_location("transcript_url_backfill", BACKFILL_PY)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"could not load {BACKFILL_PY}")
@@ -66,12 +76,15 @@ def main(argv: list[str] | None = None) -> int:
                         "is less than this (default: rerender every populated sidecar)")
     args = p.parse_args(argv)
 
-    bf = _load_backfill_module()
     try:
-        s3, bucket = bf._r2_client()
-    except RuntimeError as e:
+        coords = r2_coordinates()
+        s3 = r2_client(coords)
+    except R2Error as e:
         _stderr(str(e))
         return 1
+    bucket = coords.bucket
+
+    bf = _load_backfill_module()
 
     key_prefix = args.key_prefix.rstrip("/")
     _stderr(f"scanning r2://{bucket}/{key_prefix}/ for populated sidecars…")
@@ -80,29 +93,27 @@ def main(argv: list[str] | None = None) -> int:
     skipped_no_url = 0
     skipped_filtered = 0
 
-    paginator = s3.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=bucket, Prefix=f"{key_prefix}/"):
-        for obj in page.get("Contents", []):
-            key = obj["Key"]
-            if not key.endswith(".meta.json"):
+    for obj in list_keys(f"{key_prefix}/", s3=s3):
+        key = obj["key"]
+        if not key.endswith(".meta.json"):
+            continue
+        sid = key[len(f"{key_prefix}/"):-len(".meta.json")]
+        try:
+            body = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+            meta = json.loads(body)
+        except Exception as e:
+            _stderr(f"  skip {sid}: read failed ({e})")
+            continue
+        session_url = (meta.get("session_url") or "").strip()
+        if not session_url:
+            skipped_no_url += 1
+            continue
+        if args.filter_renderer_version is not None:
+            rv = meta.get("renderer_version")
+            if isinstance(rv, int) and rv >= args.filter_renderer_version:
+                skipped_filtered += 1
                 continue
-            sid = key[len(f"{key_prefix}/"):-len(".meta.json")]
-            try:
-                body = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
-                meta = json.loads(body)
-            except Exception as e:
-                _stderr(f"  skip {sid}: read failed ({e})")
-                continue
-            session_url = (meta.get("session_url") or "").strip()
-            if not session_url:
-                skipped_no_url += 1
-                continue
-            if args.filter_renderer_version is not None:
-                rv = meta.get("renderer_version")
-                if isinstance(rv, int) and rv >= args.filter_renderer_version:
-                    skipped_filtered += 1
-                    continue
-            eligible.append((sid, key, session_url))
+        eligible.append((sid, key, session_url))
 
     _stderr(
         f"  eligible={len(eligible)} skipped_no_url={skipped_no_url} "
