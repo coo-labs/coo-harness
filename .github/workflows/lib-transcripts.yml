@@ -7,9 +7,11 @@ on:
       - "scripts/transcript-render-backfill.py"
       - "scripts/transcript-url-backfill.py"
       - "scripts/transcript-rerender-v3-backfill.py"
+      - "scripts/lifecycle/session-end-transcript-export.py"
       - "scripts/ci/test-transcript-render-backfill.py"
       - "scripts/ci/test-transcript-url-backfill.py"
       - "scripts/ci/test-transcript-rerender-v3-backfill.py"
+      - "scripts/ci/test-session-end-transcript-export.py"
       - "scripts/ci/test-lib-transcripts-parity.py"
       - "pyproject.toml"
       - ".github/workflows/lib-transcripts.yml"
@@ -20,9 +22,11 @@ on:
       - "scripts/transcript-render-backfill.py"
       - "scripts/transcript-url-backfill.py"
       - "scripts/transcript-rerender-v3-backfill.py"
+      - "scripts/lifecycle/session-end-transcript-export.py"
       - "scripts/ci/test-transcript-render-backfill.py"
       - "scripts/ci/test-transcript-url-backfill.py"
       - "scripts/ci/test-transcript-rerender-v3-backfill.py"
+      - "scripts/ci/test-session-end-transcript-export.py"
       - "scripts/ci/test-lib-transcripts-parity.py"
       - "pyproject.toml"
       - ".github/workflows/lib-transcripts.yml"
@@ -67,3 +71,6 @@ jobs:
 
       - name: ported-script smoke (transcript-rerender-v3-backfill)
         run: python3 scripts/ci/test-transcript-rerender-v3-backfill.py
+
+      - name: ported-script smoke (session-end-transcript-export)
+        run: python3 scripts/ci/test-session-end-transcript-export.py
