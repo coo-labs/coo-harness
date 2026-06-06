@@ -25,6 +25,56 @@ HOOK="$SCRIPT_DIR/../hooks/bash-token-guard.sh"
 command -v jq >/dev/null || { echo "FAIL: jq required"; exit 1; }
 command -v python3 >/dev/null || { echo "FAIL: python3 required"; exit 1; }
 
+# Stage a minimal coo-memory fixture so the hook's schema reader resolves to
+# a real file with the `credentials:` + `secret_shapes:` blocks §1/§3/§4 need.
+# Without this, the test silently used /home/user/coo-memory if it happened to
+# exist (true on the dev container, false on the CI runner) — passing locally
+# and failing in CI. The §2 fallback path explicitly overrides
+# VADE_COO_MEMORY_DIR to a nonexistent dir to exercise schema-unreadable.
+FIXTURE_DIR="$(mktemp -d -t bash-token-guard-fixture.XXXXXX)"
+trap 'rm -rf "$FIXTURE_DIR"' EXIT
+mkdir -p "$FIXTURE_DIR/operations/secrets"
+cat > "$FIXTURE_DIR/operations/secrets/schema.yaml" <<'SCHEMA_EOF'
+schema_version: 1
+vault: COO
+credentials:
+  - id: github-pat-vade-coo
+    op_item: vade-coo-self-2026-04
+    op_field: token
+    status: active
+    rotation_class: III
+    env_aliases:
+      - GITHUB_MCP_PAT
+      - GITHUB_TOKEN
+  - id: mem0-api
+    op_item: mem0-vade-coo
+    op_field: credential
+    status: active
+    rotation_class: III
+    env_aliases:
+      - MEM0_API_KEY
+  - id: op-sa-token
+    op_item: service-account
+    op_field: token
+    status: active
+    rotation_class: IV
+    env_aliases:
+      - OP_SERVICE_ACCOUNT_TOKEN
+  - id: agentmail-api
+    op_item: agentmail-vade-coo
+    op_field: credential
+    status: active
+    rotation_class: III
+    env_aliases:
+      - AGENTMAIL_API_KEY
+secret_shapes:
+  - name: github-classic-pat
+    pattern: 'ghp_[A-Za-z0-9]{36}'
+  - name: github-fine-grained-pat
+    pattern: 'github_pat_[A-Za-z0-9_]{82}'
+SCHEMA_EOF
+export VADE_COO_MEMORY_DIR="$FIXTURE_DIR"
+
 PASS=0
 FAIL=0
 declare -a FAILURES=()

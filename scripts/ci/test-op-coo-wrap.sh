@@ -107,6 +107,15 @@ export COO_OP_REAL="$WORK/op-real"
 export MOCK_OP_TOKEN_A_VALUE="primary_token_AAAAAA"
 export MOCK_OP_TOKEN_B_VALUE="backup_token_BBBBBB"
 
+# Pre-export the SA-token bucket vars so each per-case `VAR=value \`
+# reassignment-without-export preserves the export attribute and the
+# wrapper subprocess actually sees the test's mock values. On a host
+# where OP_SERVICE_ACCOUNT_TOKEN is already exported (the dev container),
+# this is a no-op; on a clean runner (CI), the omission would make every
+# reassignment a non-exported local → wrapper sees the var as unset →
+# mock op-real reports bucket=OTHER and every assertion fails.
+export OP_SERVICE_ACCOUNT_TOKEN="" OP_SERVICE_ACCOUNT_TOKEN_BACKUP=""
+
 # ---- TEST 1: primary OK → uses A, no marker write ----
 fresh_env
 unset MOCK_OP_FAIL_A MOCK_OP_FAIL_B
