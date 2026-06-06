@@ -2,7 +2,7 @@
   "mcpServers": {
     "mem0": {
       "type": "stdio",
-      "command": "op",
+      "command": "/home/user/.local/bin/op",
       "args": [
         "run",
         "--env-file",
@@ -15,7 +15,7 @@
       }
     },
     "agentmail": {
-      "command": "op",
+      "command": "/home/user/.local/bin/op",
       "args": [
         "run",
         "--env-file",
