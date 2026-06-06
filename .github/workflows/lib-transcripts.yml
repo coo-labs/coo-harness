@@ -4,12 +4,18 @@ on:
   pull_request:
     paths:
       - "lib/transcripts/**"
+      - "scripts/transcript-render-backfill.py"
+      - "scripts/ci/test-transcript-render-backfill.py"
+      - "scripts/ci/test-lib-transcripts-parity.py"
       - "pyproject.toml"
       - ".github/workflows/lib-transcripts.yml"
   push:
     branches: [main]
     paths:
       - "lib/transcripts/**"
+      - "scripts/transcript-render-backfill.py"
+      - "scripts/ci/test-transcript-render-backfill.py"
+      - "scripts/ci/test-lib-transcripts-parity.py"
       - "pyproject.toml"
       - ".github/workflows/lib-transcripts.yml"
 
@@ -44,3 +50,6 @@ jobs:
 
       - name: parity check (lib vs scripts)
         run: python3 scripts/ci/test-lib-transcripts-parity.py
+
+      - name: ported-script smoke (transcript-render-backfill)
+        run: python3 scripts/ci/test-transcript-render-backfill.py
