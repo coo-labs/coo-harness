@@ -66,15 +66,21 @@ import hashlib
 import json
 import os
 import re
-import shutil
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
+# Locate coo-harness/lib/ on sys.path so `from transcripts import ...` resolves
+# under the uv-run venv this script spawns into. See lib/transcripts/README.md
+# §"Importing" for the parents[N] table; this script lives at
+# scripts/lib/<top>.py so parents[2] is the repo root.
+SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPT_DIR.parent.parent / "lib"))
+
+from transcripts import r2_client, r2_coordinates  # noqa: E402
+
 PARSER_VERSION = 1
 SCHEMA_VERSION = 1
-SCRIPT_DIR = Path(__file__).resolve().parent
 RUNTIME_ROOT = SCRIPT_DIR.parent.parent
 RECIPIENT_FILE = RUNTIME_ROOT / "scripts" / "lib" / "transcripts-recipient.age"
 
@@ -113,60 +119,13 @@ def _resolve_agent_logs_dir(explicit: str | None) -> Path:
     )
 
 
-def _op_read(ref: str) -> str:
-    if not shutil.which("op"):
-        return ""
-    try:
-        out = subprocess.run(
-            ["op", "read", ref],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        return out.stdout.strip()
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        return ""
-
-
-def _r2_creds() -> tuple[str, str, str, str]:
-    access_key = os.environ.get("R2_TRANSCRIPTS_ACCESS_KEY_ID", "").strip()
-    secret_key = os.environ.get("R2_TRANSCRIPTS_SECRET_ACCESS_KEY", "").strip()
-    if not access_key or not secret_key:
-        raise RuntimeError(
-            "R2_TRANSCRIPTS_ACCESS_KEY_ID / R2_TRANSCRIPTS_SECRET_ACCESS_KEY "
-            "missing — ensure the bash wrapper ran its op-read resolver "
-            "(Phase 2 post-coo-memory#873) or set both vars explicitly"
-        )
-    endpoint = _op_read("op://COO/r2-transcripts/endpoint")
-    bucket = _op_read("op://COO/r2-transcripts/bucket")
-    if not endpoint or not bucket:
-        raise RuntimeError(
-            "op://COO/r2-transcripts/{endpoint,bucket} unreadable — "
-            "verify OP_SERVICE_ACCOUNT_TOKEN and 1Password provisioning"
-        )
-    return access_key, secret_key, endpoint, bucket
-
-
-def _r2_client(access_key: str, secret_key: str, endpoint: str):
-    import boto3
-    from botocore.config import Config
-
-    return boto3.client(
-        "s3",
-        endpoint_url=endpoint,
-        aws_access_key_id=access_key,
-        aws_secret_access_key=secret_key,
-        region_name="auto",
-        config=Config(
-            signature_version="s3v4",
-            retries={"max_attempts": 3, "mode": "standard"},
-        ),
-    )
-
-
 def _list_r2_keys(s3, bucket: str, prefix: str) -> list[dict]:
-    """Return [{key, size, last_modified}, ...] under prefix."""
+    """Return [{key, size, last_modified}, ...] under prefix.
+
+    Local helper kept because lib's `list_keys` returns last_modified as
+    an ISO-formatted string for JSON output; this script's iter uses the
+    raw datetime to populate sidecar `exported_at` via .astimezone(...).
+    """
     out: list[dict] = []
     paginator = s3.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
@@ -215,13 +174,21 @@ def _meta_already_present(sidecar_dir: Path, session_id: str) -> tuple[bool, str
     return True, "real meta.json already present"
 
 
-def _r2_iter(date_filter: str | None, session_id_filter: str | None):
+def _r2_iter(
+    s3,
+    bucket: str,
+    endpoint: str,
+    date_filter: str | None,
+    session_id_filter: str | None,
+):
     """Yield (key, size, last_modified, date_path, sid) tuples that match
     the requested scope. `date_filter` is YYYY/MM/DD; `session_id_filter`
-    is the bare session id (we walk the bucket and grep by sid)."""
-    access_key, secret_key, endpoint, bucket = _r2_creds()
-    s3 = _r2_client(access_key, secret_key, endpoint)
+    is the bare session id (we walk the bucket and grep by sid).
 
+    Takes a pre-built `s3` client + `bucket` + `endpoint` so a single
+    `r2_coordinates()` resolution at main() time is shared across both
+    the iter and the per-entry head/download work in `_backfill_one`.
+    """
     if date_filter:
         prefix = f"transcripts/{date_filter}/"
     else:
@@ -444,13 +411,17 @@ def main(argv: list[str]) -> int:
     agent_logs_dir = _resolve_agent_logs_dir(args.agent_logs_dir)
     transcripts_root = agent_logs_dir / "transcripts"
 
-    access_key, secret_key, endpoint, bucket = _r2_creds()
-    s3 = _r2_client(access_key, secret_key, endpoint)
+    coords = r2_coordinates()
+    s3 = r2_client(coords)
+    endpoint = coords.endpoint
+    bucket = coords.bucket
 
     seen = 0
     written = 0
     skipped = 0
-    for entry, date_path, sid, _, _ in _r2_iter(args.date, args.session_id):
+    for entry, date_path, sid, _, _ in _r2_iter(
+        s3, bucket, endpoint, args.date, args.session_id
+    ):
         seen += 1
         sidecar_dir = transcripts_root / date_path
         line = _backfill_one(

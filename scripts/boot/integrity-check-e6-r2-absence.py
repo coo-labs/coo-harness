@@ -52,6 +52,15 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+# Locate coo-harness/lib/ on sys.path so `from transcripts import ...` resolves
+# under the uv-run venv this script spawns into. See lib/transcripts/README.md
+# §"Importing" for the parents[N] table; this script lives at
+# scripts/boot/<top>.py so parents[2] is the repo root.
+SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPT_DIR.parent.parent / "lib"))
+
+from transcripts import R2Error, r2_client, r2_coordinates  # noqa: E402
+
 
 def _stderr(msg: str) -> None:
     sys.stderr.write(f"[integrity-check-e6] {msg}\n")
@@ -60,49 +69,6 @@ def _stderr(msg: str) -> None:
 def _emit(payload: dict) -> None:
     sys.stdout.write(json.dumps(payload) + "\n")
     sys.stdout.flush()
-
-
-def _op_read(ref: str) -> str:
-    """Read a 1Password ref via `op` CLI; return empty string on miss.
-
-    Mirror of integrity-check-e8-r2-orphan.py — the R2 endpoint and
-    bucket are stored in 1Password rather than env so they can rotate
-    without a settings.json patch.
-    """
-    import shutil
-    import subprocess
-
-    if not shutil.which("op"):
-        return ""
-    try:
-        out = subprocess.run(
-            ["op", "read", ref],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        return out.stdout.strip()
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        return ""
-
-
-def _r2_client(endpoint: str, access: str, secret: str):
-    """Build an R2 boto3 client. Mirror of E8 + transcript-fetch.py."""
-    import boto3
-    from botocore.config import Config
-
-    return boto3.client(
-        "s3",
-        endpoint_url=endpoint,
-        aws_access_key_id=access,
-        aws_secret_access_key=secret,
-        region_name="auto",
-        config=Config(
-            signature_version="s3v4",
-            retries={"max_attempts": 2, "mode": "standard"},
-        ),
-    )
 
 
 def _date_prefixes(now: datetime) -> list[str]:
@@ -250,15 +216,15 @@ def main() -> int:
     ap.add_argument("--verbose", action="store_true", help="Per-row detail to stderr.")
     args = ap.parse_args()
 
-    access = os.environ.get("R2_TRANSCRIPTS_ACCESS_KEY_ID", "").strip()
-    secret = os.environ.get("R2_TRANSCRIPTS_SECRET_ACCESS_KEY", "").strip()
-    if not access or not secret:
+    try:
+        coords = r2_coordinates()
+    except R2Error as e:
         _emit(
             {
                 "ok": True,
                 "local_count": 0,
                 "r2_count": 0,
-                "detail": "skip: R2_TRANSCRIPTS_{ACCESS,SECRET}_KEY missing",
+                "detail": f"skip: {e}",
             }
         )
         return 0
@@ -305,19 +271,6 @@ def main() -> int:
         )
         return 0
 
-    endpoint = _op_read("op://COO/r2-transcripts/endpoint")
-    bucket = _op_read("op://COO/r2-transcripts/bucket")
-    if not endpoint or not bucket:
-        _emit(
-            {
-                "ok": True,
-                "local_count": local_count,
-                "r2_count": 0,
-                "detail": "skip: op://COO/r2-transcripts/{endpoint,bucket} not readable",
-            }
-        )
-        return 0
-
     try:
         import boto3  # noqa: F401  (imported for side-effect of asserting availability)
         from botocore.exceptions import ClientError
@@ -332,7 +285,8 @@ def main() -> int:
         )
         return 0
 
-    s3 = _r2_client(endpoint, access, secret)
+    s3 = r2_client(coords)
+    bucket = coords.bucket
     prefixes = _date_prefixes(now)
 
     r2_count = 0
