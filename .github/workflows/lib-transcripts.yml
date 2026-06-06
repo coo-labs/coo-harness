@@ -9,11 +9,16 @@ on:
       - "scripts/transcript-rerender-v3-backfill.py"
       - "scripts/lifecycle/session-end-transcript-export.py"
       - "scripts/lifecycle/session-end-transcript-render.py"
+      - "scripts/boot/integrity-check-e6-r2-absence.py"
+      - "scripts/boot/integrity-check-e8-r2-orphan.py"
+      - "scripts/lib/list-r2-transcripts.py"
+      - "scripts/lib/transcript-meta-backfill.py"
       - "scripts/ci/test-transcript-render-backfill.py"
       - "scripts/ci/test-transcript-url-backfill.py"
       - "scripts/ci/test-transcript-rerender-v3-backfill.py"
       - "scripts/ci/test-session-end-transcript-export.py"
       - "scripts/ci/test-session-end-transcript-render.py"
+      - "scripts/ci/test-r2-mop-up-ports.py"
       - "scripts/ci/test-lib-transcripts-parity.py"
       - "pyproject.toml"
       - ".github/workflows/lib-transcripts.yml"
@@ -26,11 +31,16 @@ on:
       - "scripts/transcript-rerender-v3-backfill.py"
       - "scripts/lifecycle/session-end-transcript-export.py"
       - "scripts/lifecycle/session-end-transcript-render.py"
+      - "scripts/boot/integrity-check-e6-r2-absence.py"
+      - "scripts/boot/integrity-check-e8-r2-orphan.py"
+      - "scripts/lib/list-r2-transcripts.py"
+      - "scripts/lib/transcript-meta-backfill.py"
       - "scripts/ci/test-transcript-render-backfill.py"
       - "scripts/ci/test-transcript-url-backfill.py"
       - "scripts/ci/test-transcript-rerender-v3-backfill.py"
       - "scripts/ci/test-session-end-transcript-export.py"
       - "scripts/ci/test-session-end-transcript-render.py"
+      - "scripts/ci/test-r2-mop-up-ports.py"
       - "scripts/ci/test-lib-transcripts-parity.py"
       - "pyproject.toml"
       - ".github/workflows/lib-transcripts.yml"
@@ -81,3 +91,6 @@ jobs:
 
       - name: ported-script smoke (session-end-transcript-render)
         run: python3 scripts/ci/test-session-end-transcript-render.py
+
+      - name: ported-script smoke (r2-mop-up: e6/e8 + list-r2-transcripts + meta-backfill)
+        run: python3 scripts/ci/test-r2-mop-up-ports.py
