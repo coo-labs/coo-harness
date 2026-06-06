@@ -8,11 +8,17 @@
 #     it to OK or FAIL on the first tool call after manifest validation.
 #   - Clean up stale sentinels and expired override sentinels from
 #     prior sessions in this container. Keeps state-dir bounded.
+#   - Rotate brake-events.jsonl on UTC-day boundaries; compact daily
+#     files older than the current month into a single .jsonl.gz
+#     (coo-memory#1168 O6).
+#   - Sweep aged-out validator-self-fault diagnostics in
+#     boot-brake-faults/ (coo-memory#1168 O8).
 #
 # Always exits 0. Boot-impacting failures are logged but never block
 # the session from starting.
 #
-# Reference: coo-memory#1082 v2 §6 (sentinel lifecycle).
+# Reference: coo-memory#1082 v2 §6 (sentinel lifecycle);
+# coo-memory#1168 (storage hygiene).
 
 set -uo pipefail
 
@@ -71,6 +77,71 @@ find "$HOME/.vade" -maxdepth 1 -name "boot-brake-override.*.json" 2>/dev/null \
 # Old session-reads logs sweep (older than 24h)
 find "$HOME/.vade" -maxdepth 1 -name "session-reads.*.log" -mmin +1440 2>/dev/null \
   -exec rm -f {} \; 2>/dev/null || true
+
+# Aged-out validator-self-fault diagnostics (coo-memory#1168 O8). A
+# misconfigured manifest faults on every PreToolUse — without a sweep,
+# boot-brake-faults/ accumulates thousands of files per day. Bound at
+# 24h same as the sentinel sweep so a triage window survives long
+# enough to inspect.
+faults_dir="$VADE_CLOUD_STATE_DIR/boot-brake-faults"
+if [ -d "$faults_dir" ]; then
+  find "$faults_dir" -mindepth 1 -mmin +1440 -delete 2>/dev/null || true
+fi
+
+# Daily rotation of brake-events.jsonl (coo-memory#1168 O6). When the
+# live event log straddles a UTC-day boundary, rename it to a dated
+# sibling so the live file stays bounded and historical days are
+# addressable by name. Idempotent: same-day re-fire is a no-op.
+events_log="$VADE_CLOUD_STATE_DIR/brake-events.jsonl"
+if [ -s "$events_log" ]; then
+  today_utc="$(date -u +%Y-%m-%d 2>/dev/null || true)"
+  mtime_utc="$(date -u -r "$events_log" +%Y-%m-%d 2>/dev/null || true)"
+  if [ -n "$today_utc" ] && [ -n "$mtime_utc" ] && [ "$mtime_utc" != "$today_utc" ]; then
+    dated="$VADE_CLOUD_STATE_DIR/brake-events.${mtime_utc}.jsonl"
+    if [ -f "$dated" ]; then
+      # Re-rotation to a date that already has a daily sibling
+      # (shouldn't happen in practice — would require the clock to
+      # walk backward, which boot-time hygiene shouldn't tolerate
+      # silently). Concatenate rather than clobber so accumulated
+      # events survive.
+      cat "$events_log" >> "$dated" 2>/dev/null && : > "$events_log" 2>/dev/null
+    else
+      mv -f "$events_log" "$dated" 2>/dev/null && : > "$events_log" 2>/dev/null
+    fi
+    chmod 600 "$dated" 2>/dev/null || true
+    : > "$events_log" 2>/dev/null
+    chmod 600 "$events_log" 2>/dev/null || true
+  fi
+fi
+
+# Monthly compaction (coo-memory#1168 O6). Daily files from months
+# strictly older than the current YYYY-MM get concatenated into a
+# single gzipped sibling — ~10x storage saving without losing any
+# event. Idempotent: re-running on an already-compacted month folds
+# any stray daily files in; the current month is never touched, so
+# in-flight days are preserved.
+current_ym="$(date -u +%Y-%m 2>/dev/null || echo 9999-99)"
+for daily in "$VADE_CLOUD_STATE_DIR"/brake-events.????-??-??.jsonl; do
+  [ -f "$daily" ] || continue
+  fname="$(basename "$daily")"
+  date_part="${fname#brake-events.}"
+  date_part="${date_part%.jsonl}"
+  ym="${date_part%-*}"
+  [ "$ym" \< "$current_ym" ] || continue
+  monthly_gz="$VADE_CLOUD_STATE_DIR/brake-events.${ym}.jsonl.gz"
+  new_tmp="$monthly_gz.tmp.$$"
+  {
+    [ -f "$monthly_gz" ] && gunzip -c "$monthly_gz" 2>/dev/null
+    cat "$daily" 2>/dev/null
+  } | gzip > "$new_tmp" 2>/dev/null
+  if [ -s "$new_tmp" ]; then
+    mv -f "$new_tmp" "$monthly_gz" 2>/dev/null
+    chmod 600 "$monthly_gz" 2>/dev/null || true
+    rm -f "$daily" 2>/dev/null
+  else
+    rm -f "$new_tmp" 2>/dev/null
+  fi
+done
 
 boot_log_record boot-brake-clear end ok "session=$session_id"
 exit 0

@@ -54,6 +54,19 @@ from pathlib import Path
 
 _SAFE_CHARSET = set(string.ascii_letters + string.digits + " ._/:-")
 
+# Permitted syntax for has_jq_path check_arg values (coo-memory#1168 O15).
+# The homegrown walker below intentionally implements a strict subset of
+# jq syntax: a leading identifier, then zero or more `.identifier` or
+# `[<digits>]` accessors. Validating at check time keeps malformed
+# manifest entries from raising generic exceptions; the deny reason
+# names the offending value so an operator can fix the manifest.
+# Anything richer (filters, alternatives, recursive descent) requires
+# spawning real jq, which is rejected here on hot-path-cost grounds —
+# this guard fires on every PreToolUse.
+_JQ_PATH_SAFE_RE = re.compile(
+    r"^\.?[A-Za-z0-9_]+(\[\d+\])?(\.[A-Za-z0-9_]+(\[\d+\])?)*$"
+)
+
 
 def sanitize(s, max_len=240):
     """Strip any char outside the safe set; truncate. v2 §4 (R2#6).
@@ -366,6 +379,12 @@ def check_deliverable(entry, env, home, session_id, cwd):
 
     if kind == "has_jq_path":
         jq_path = entry.get("check_arg", "")
+        if not _JQ_PATH_SAFE_RE.match(jq_path or ""):
+            # coo-memory#1168 O15: refuse anything outside the documented
+            # subset. A typo or richer-than-supported expression should
+            # land as a deliverable failure naming the offending value,
+            # not silently degrade through the generic exception arm.
+            return False, f"unsupported jq path syntax: {sanitize(jq_path)}", None, []
         try:
             with open(path) as fh:
                 content = fh.read()
