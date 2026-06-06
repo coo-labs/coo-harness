@@ -39,14 +39,39 @@ trap '_rc=$?; boot_log_record post-bootstrap-chain end $([ $_rc -eq 0 ] && echo 
 
 LIFECYCLE_DIR="$SCRIPT_DIR/../lifecycle"
 
+# Trace + fault-inject knobs for the Layer-1.5 ordering test (coo-memory#1250).
+# Both are env-gated: unset = no overhead, no behavior change. The trace file
+# is JSONL — one record per child — so the test can assert order + rc cleanly
+# without parsing the production boot.log noise.
+_chain_order=0
+_trace_record() {
+  local child="$1" rc="$2"
+  [ -z "${VADE_POST_BOOTSTRAP_TRACE_OUT:-}" ] && return 0
+  local ts
+  ts="$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
+  mkdir -p "$(dirname "$VADE_POST_BOOTSTRAP_TRACE_OUT")" 2>/dev/null || return 0
+  printf '{"ts":"%s","order":%d,"child":"%s","rc":%d}\n' \
+    "$ts" "$_chain_order" "$child" "$rc" \
+    >> "$VADE_POST_BOOTSTRAP_TRACE_OUT" 2>/dev/null || return 0
+}
+
 _run_child() {
   local name="$1" path="$2"
   shift 2
-  if [ ! -x "$path" ] && [ ! -r "$path" ]; then
-    log "post-bootstrap-chain: $name missing at $path; skipping"
+  _chain_order=$((_chain_order + 1))
+  if [ "${VADE_POST_BOOTSTRAP_FAULT_INJECT:-}" = "$name" ]; then
+    log "post-bootstrap-chain: $name fault-injected (rc=7); continuing"
+    _trace_record "$name" 7
     return 0
   fi
-  bash "$path" "$@" || log "post-bootstrap-chain: $name exited non-zero (rc=$?); continuing"
+  if [ ! -x "$path" ] && [ ! -r "$path" ]; then
+    log "post-bootstrap-chain: $name missing at $path; skipping"
+    _trace_record "$name" 0
+    return 0
+  fi
+  local rc=0
+  bash "$path" "$@" || { rc=$?; log "post-bootstrap-chain: $name exited non-zero (rc=$rc); continuing"; }
+  _trace_record "$name" "$rc"
 }
 
 _run_child coo-identity-digest    "$LIFECYCLE_DIR/coo-identity-digest.sh"
@@ -59,7 +84,14 @@ _run_child session-idle-watchdog  "$LIFECYCLE_DIR/session-idle-watchdog.sh" --st
 # complete. The boot banner (from the digest above) has already rendered
 # fast-phase results; consumers reading later (debug-mode skill,
 # /verify-secrets, etc.) get the merged result.
-nohup bash "$SCRIPT_DIR/integrity-check.sh" >/dev/null 2>&1 < /dev/null &
-disown 2>/dev/null || true
+_chain_order=$((_chain_order + 1))
+if [ "${VADE_POST_BOOTSTRAP_FAULT_INJECT:-}" = "integrity-check-live" ]; then
+  log "post-bootstrap-chain: integrity-check-live fault-injected (skip); continuing"
+  _trace_record "integrity-check-live" 7
+else
+  _trace_record "integrity-check-live" 0
+  nohup bash "$SCRIPT_DIR/integrity-check.sh" >/dev/null 2>&1 < /dev/null &
+  disown 2>/dev/null || true
+fi
 
 exit 0
