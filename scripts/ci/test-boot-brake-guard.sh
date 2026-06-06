@@ -713,6 +713,233 @@ else
   _fail "Non-Read also bypassed backpressure (over-broad bypass; checked_at changed)"
 fi
 
+# ─── Test 25 (NEW): clear-hook rotates brake-events.jsonl across UTC-day (#1168 O6) ─
+echo "Test 25 — clear-hook rotates brake-events.jsonl on day boundary (coo-memory#1168 O6)"
+set -- $(echo "$(_setup_session_dirs "t25")" | tr '|' ' ')
+state_dir="$1"; home_dir="$2"
+events_log="$state_dir/brake-events.jsonl"
+printf '{"v":1,"ts":"2026-06-04T08:00:00Z","cause":"deliverable_missing"}\n' > "$events_log"
+# Backdate mtime by 48h so it's strictly before today (UTC).
+touch -d "2 days ago" "$events_log"
+mtime_date="$(date -u -r "$events_log" +%Y-%m-%d)"
+VADE_CLOUD_STATE_DIR="$state_dir" HOME="$home_dir" \
+  CLAUDE_CODE_SESSION_ID="t25" \
+  bash "$CLEAR" 2>/dev/null </dev/null
+dated="$state_dir/brake-events.${mtime_date}.jsonl"
+if [ -f "$dated" ] && grep -q "deliverable_missing" "$dated" 2>/dev/null; then
+  _pass "stale jsonl rotated to brake-events.${mtime_date}.jsonl with content preserved"
+else
+  _fail "rotation didn't produce ${dated} (state_dir: $(ls "$state_dir"))"
+fi
+if [ ! -s "$events_log" ]; then
+  _pass "live events.jsonl drained after rotation (next session writes from empty)"
+else
+  _fail "live events.jsonl still has bytes after rotation"
+fi
+# Same-day re-fire: no further rotation should happen.
+printf '{"v":1,"ts":"%s","cause":"all_satisfied"}\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$events_log"
+size_before="$(wc -c < "$events_log")"
+VADE_CLOUD_STATE_DIR="$state_dir" HOME="$home_dir" \
+  CLAUDE_CODE_SESSION_ID="t25" \
+  bash "$CLEAR" 2>/dev/null </dev/null
+size_after="$(wc -c < "$events_log")"
+if [ "$size_before" = "$size_after" ]; then
+  _pass "same-day re-fire leaves today's events.jsonl untouched (idempotent)"
+else
+  _fail "re-fire mutated today's events.jsonl ($size_before → $size_after)"
+fi
+
+# ─── Test 26 (NEW): clear-hook sweeps faults-dir entries older than 24h (#1168 O8) ─
+echo "Test 26 — clear-hook sweeps boot-brake-faults/ entries > 24h (coo-memory#1168 O8)"
+set -- $(echo "$(_setup_session_dirs "t26")" | tr '|' ' ')
+state_dir="$1"; home_dir="$2"
+faults_dir="$state_dir/boot-brake-faults"
+mkdir -p "$faults_dir"
+touch -d "48 hours ago" "$faults_dir/old.log"
+touch "$faults_dir/recent.log"
+VADE_CLOUD_STATE_DIR="$state_dir" HOME="$home_dir" \
+  CLAUDE_CODE_SESSION_ID="t26" \
+  bash "$CLEAR" 2>/dev/null </dev/null
+if [ ! -e "$faults_dir/old.log" ] && [ -e "$faults_dir/recent.log" ]; then
+  _pass "old fault diagnostic swept; recent one preserved"
+else
+  _fail "fault sweep wrong: old.log=$([ -e $faults_dir/old.log ] && echo present || echo gone), recent.log=$([ -e $faults_dir/recent.log ] && echo present || echo gone)"
+fi
+
+# ─── Test 27 (NEW): clear-hook compacts old-month daily files to .jsonl.gz (#1168 O6) ─
+echo "Test 27 — clear-hook compacts month-old daily files into .jsonl.gz (coo-memory#1168 O6)"
+set -- $(echo "$(_setup_session_dirs "t27")" | tr '|' ' ')
+state_dir="$1"; home_dir="$2"
+# Stage two daily files from a month at least 2 months back so today's
+# current_ym can never collide regardless of when CI runs.
+old_month="2024-01"
+printf '{"v":1,"ts":"2024-01-15T08:00:00Z","cause":"deliverable_missing"}\n' \
+  > "$state_dir/brake-events.${old_month}-15.jsonl"
+printf '{"v":1,"ts":"2024-01-22T08:00:00Z","cause":"all_satisfied"}\n' \
+  > "$state_dir/brake-events.${old_month}-22.jsonl"
+VADE_CLOUD_STATE_DIR="$state_dir" HOME="$home_dir" \
+  CLAUDE_CODE_SESSION_ID="t27" \
+  bash "$CLEAR" 2>/dev/null </dev/null
+monthly_gz="$state_dir/brake-events.${old_month}.jsonl.gz"
+if [ -f "$monthly_gz" ]; then
+  _pass "monthly .jsonl.gz produced for ${old_month}"
+else
+  _fail "no monthly .jsonl.gz produced (state_dir: $(ls "$state_dir"))"
+fi
+if [ ! -e "$state_dir/brake-events.${old_month}-15.jsonl" ] \
+   && [ ! -e "$state_dir/brake-events.${old_month}-22.jsonl" ]; then
+  _pass "compacted daily files removed"
+else
+  _fail "daily files still present after compaction"
+fi
+# Round-trip: gunzip the archive and confirm both events survive.
+if [ -f "$monthly_gz" ]; then
+  contents="$(gunzip -c "$monthly_gz" 2>/dev/null)"
+  if echo "$contents" | grep -q "2024-01-15" && echo "$contents" | grep -q "2024-01-22"; then
+    _pass "compacted archive round-trips both days' events"
+  else
+    _fail "compacted archive missing events (got: $contents)"
+  fi
+fi
+# Idempotency: re-fire is a no-op since there are no more old daily files.
+size_before="$(wc -c < "$monthly_gz")"
+VADE_CLOUD_STATE_DIR="$state_dir" HOME="$home_dir" \
+  CLAUDE_CODE_SESSION_ID="t27" \
+  bash "$CLEAR" 2>/dev/null </dev/null
+size_after="$(wc -c < "$monthly_gz")"
+if [ "$size_before" = "$size_after" ]; then
+  _pass "compaction re-fire with no new dailies is idempotent"
+else
+  _fail "compaction re-fire mutated archive ($size_before → $size_after)"
+fi
+
+# ─── Test 28 (NEW): race-gate clears via explicit phase=end markers (#1168 O14) ─
+echo "Test 28 — race-gate clears when boot.log carries phase=end for all producers (coo-memory#1168 O14)"
+set -- $(echo "$(_setup_session_dirs "t28")" | tr '|' ' ')
+state_dir="$1"; home_dir="$2"
+_make_all_deliverables_present "$state_dir" "$home_dir" "t28"
+mkdir -p "$home_dir/.vade"
+ts_iso="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+# Write phase=start + phase=end pairs for each tracked producer.
+# Unlike Test 15 (which exercises the start+elapsed fallback), this
+# test exercises the canonical phase=end signal — the path Test 12 + 15
+# never touched (coo-memory#1168 O14).
+cat > "$home_dir/.vade/boot.log" <<EOF
+{"ts":"$ts_iso","session":"t28","script":"session-start-sync","phase":"start"}
+{"ts":"$ts_iso","session":"t28","script":"session-start-sync","phase":"end"}
+{"ts":"$ts_iso","session":"t28","script":"coo-bootstrap","phase":"start"}
+{"ts":"$ts_iso","session":"t28","script":"coo-bootstrap","phase":"end"}
+{"ts":"$ts_iso","session":"t28","script":"coo-identity-digest","phase":"start"}
+{"ts":"$ts_iso","session":"t28","script":"coo-identity-digest","phase":"end"}
+EOF
+# Race window large enough that absent end-markers would gate; with end
+# markers present the gate must clear immediately and the state must
+# settle to OK (deliverables are seeded by _make_all_deliverables_present).
+out="$(printf '{"session_id":"t28","cwd":"/home/user","tool_name":"Bash","tool_input":{"command":"ls"}}' | \
+  VADE_BRAKE_ENFORCE=block-on-FAIL \
+  VADE_BRAKE_RACE_GRACE_SECONDS=300 \
+  VADE_CLOUD_STATE_DIR="$state_dir" \
+  VADE_COO_MEMORY_DIR="$COO_MEMORY_DIR" \
+  HOME="$home_dir" \
+  bash "$GUARD" 2>/dev/null)"
+state_t28="$(python3 -c "import json; print(json.load(open('$state_dir/boot-brake.t28.json'))['state'])")"
+if [ "$state_t28" = "OK" ] && [ -z "$out" ]; then
+  _pass "phase=end markers → race-gate clears immediately → state=OK"
+else
+  _fail "phase=end markers didn't clear race-gate (state=$state_t28, out=$out)"
+fi
+# Negative control: drop the last end-marker → coo-identity-digest is
+# considered still in-flight, race-gate engages.
+cat > "$home_dir/.vade/boot.log" <<EOF
+{"ts":"$ts_iso","session":"t28b","script":"session-start-sync","phase":"start"}
+{"ts":"$ts_iso","session":"t28b","script":"session-start-sync","phase":"end"}
+{"ts":"$ts_iso","session":"t28b","script":"coo-bootstrap","phase":"start"}
+{"ts":"$ts_iso","session":"t28b","script":"coo-bootstrap","phase":"end"}
+{"ts":"$ts_iso","session":"t28b","script":"coo-identity-digest","phase":"start"}
+EOF
+set -- $(echo "$(_setup_session_dirs "t28b")" | tr '|' ' ')
+state_dir="$1"; home_dir="$2"
+_make_all_deliverables_present "$state_dir" "$home_dir" "t28b"
+mkdir -p "$home_dir/.vade"
+# Re-emit the partial boot.log (the prior _setup_session_dirs wiped it)
+cat > "$home_dir/.vade/boot.log" <<EOF
+{"ts":"$ts_iso","session":"t28b","script":"session-start-sync","phase":"start"}
+{"ts":"$ts_iso","session":"t28b","script":"session-start-sync","phase":"end"}
+{"ts":"$ts_iso","session":"t28b","script":"coo-bootstrap","phase":"start"}
+{"ts":"$ts_iso","session":"t28b","script":"coo-bootstrap","phase":"end"}
+{"ts":"$ts_iso","session":"t28b","script":"coo-identity-digest","phase":"start"}
+EOF
+printf '{"session_id":"t28b","cwd":"/home/user","tool_name":"Bash","tool_input":{"command":"ls"}}' | \
+  VADE_BRAKE_ENFORCE=block-on-FAIL \
+  VADE_BRAKE_RACE_GRACE_SECONDS=300 \
+  VADE_CLOUD_STATE_DIR="$state_dir" \
+  VADE_COO_MEMORY_DIR="$COO_MEMORY_DIR" \
+  HOME="$home_dir" \
+  bash "$GUARD" 2>/dev/null > /dev/null
+state_t28b="$(python3 -c "import json; print(json.load(open('$state_dir/boot-brake.t28b.json'))['state'])")"
+missing_t28b="$(python3 -c "import json; d=json.load(open('$state_dir/boot-brake.t28b.json')); print(','.join((d.get('race_gate') or {}).get('missing_producers', [])))")"
+if [ "$state_t28b" = "PENDING" ] && [[ "$missing_t28b" == *"coo-identity-digest"* ]]; then
+  _pass "missing phase=end on coo-identity-digest → race-gate engages (negative control)"
+else
+  _fail "negative race-gate check (state=$state_t28b, missing=$missing_t28b)"
+fi
+
+# ─── Test 29 (NEW): has_jq_path rejects unsupported syntax (#1168 O15) ─
+echo "Test 29 — has_jq_path rejects unsupported syntax with specific deny reason (coo-memory#1168 O15)"
+set -- $(echo "$(_setup_session_dirs "t29")" | tr '|' ' ')
+state_dir="$1"; home_dir="$2"
+_make_all_deliverables_present "$state_dir" "$home_dir" "t29"
+# Stage a fixture manifest with a deliberately-malformed has_jq_path entry.
+malformed_manifest="$TEST_ROOT/malformed-coo-memory"
+mkdir -p "$malformed_manifest/operations"
+cat > "$malformed_manifest/operations/boot-deliverables.yml" <<'EOF'
+manifest_version: 2
+deliverables:
+  - id: integrity_check_json
+    path: $VADE_CLOUD_STATE_DIR/integrity-check.json
+    check_kind: has_jq_path
+    check_arg: "summary.ok | select(.x)"
+    producer: coo-harness/scripts/boot/integrity-check.sh
+    severity: critical
+EOF
+out="$(VADE_COO_MEMORY_DIR_OVERRIDE="$malformed_manifest" \
+  _invoke_guard t29 Bash block-on-FAIL "$state_dir" "$home_dir" "ls")"
+if printf '%s' "$out" | grep -q 'unsupported jq path syntax'; then
+  _pass "malformed has_jq_path → deny reason names 'unsupported jq path syntax'"
+else
+  _fail "malformed has_jq_path didn't surface the syntax error (got: $out)"
+fi
+# Sanity: a well-formed has_jq_path still works.
+cat > "$malformed_manifest/operations/boot-deliverables.yml" <<'EOF'
+manifest_version: 2
+deliverables:
+  - id: integrity_check_json
+    path: $VADE_CLOUD_STATE_DIR/integrity-check.json
+    check_kind: has_jq_path
+    check_arg: "summary.ok"
+    producer: coo-harness/scripts/boot/integrity-check.sh
+    severity: critical
+EOF
+set -- $(echo "$(_setup_session_dirs "t29b")" | tr '|' ' ')
+state_dir="$1"; home_dir="$2"
+# integrity-check.json with summary.ok=true satisfies the check.
+mkdir -p "$state_dir" "$home_dir/.vade" "$home_dir/.claude"
+printf '{"summary":{"ok":true}}' > "$state_dir/integrity-check.json"
+out="$(VADE_COO_MEMORY_DIR_OVERRIDE="$malformed_manifest" \
+  _invoke_guard t29b Bash block-on-FAIL "$state_dir" "$home_dir" "ls")"
+if [ -z "$out" ]; then
+  _pass "well-formed has_jq_path resolves to OK (no deny output)"
+else
+  # Could still fail on other deliverables but the syntax-check shouldn't be the cause.
+  if printf '%s' "$out" | grep -q 'unsupported jq path syntax'; then
+    _fail "well-formed has_jq_path mis-rejected as unsupported (got: $out)"
+  else
+    # Some other deliverable might be missing — that's fine, not our test.
+    _pass "well-formed has_jq_path didn't trip O15 syntax check (any deny is for other deliverables)"
+  fi
+fi
+
 # ─── Summary ────────────────────────────────────────────────────
 echo
 echo "===================================="
