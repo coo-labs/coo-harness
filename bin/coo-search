@@ -1,0 +1,391 @@
+#!/usr/bin/env python3
+"""coo-search — query the coo_corpus Cloudflare D1 database for past sessions.
+
+Canonical "have I done this before?" surface for the COO. D1 stores per-session
+metadata indexed by the nightly `corpus-index` workflow in coo-labs/coo-logs
+(see coo-labs/coo-memory#1149 for the Phase 3 scope; MEMO-2026-06-06-keks for
+the D1 + token-scope ack).
+
+Subcommands:
+  sessions    list sessions, filtered by repo / date / cwd / model
+  tool-calls  list per-tool call counts, filtered by tool name or session
+  files       (deferred to Phase 4) list sessions that touched a file path —
+              falls back to artifact-ref scanning until session_files lands
+  artifacts   list artifact refs (PRs/issues/comments) by string match
+  errors      list sessions with non-zero error_count
+  excerpt     (deferred to Phase 4) fetch an excerpt around a tool call —
+              requires rendered HTML / jsonl access not yet exposed
+
+Auth via env:
+  CLOUDFLARE_API_TOKEN  (Account D1:Read; the rotated vade-coo-2026-05 token)
+  CLOUDFLARE_ACCOUNT_ID
+  D1_DATABASE_ID        (the coo_corpus database UUID)
+"""
+
+from __future__ import annotations
+
+import argparse
+import gzip
+import json
+import os
+import shutil
+import sqlite3
+import sys
+import tempfile
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+D1_API_BASE = "https://api.cloudflare.com/client/v4"
+DEFAULT_LIMIT = 20
+
+# Module-level backend selection — set by main() before subcommands run.
+_BACKEND: dict[str, Any] = {"kind": "d1", "conn": None}
+
+
+def _env(name: str) -> str:
+    v = os.environ.get(name, "").strip()
+    if not v:
+        sys.stderr.write(f"coo-search: env {name} is empty or unset\n")
+        sys.exit(2)
+    return v
+
+
+def _open_snapshot(snapshot: Path) -> sqlite3.Connection:
+    """Decompress a .db.gz to a temp file, return a sqlite3 connection.
+
+    Caller responsible for the connection lifetime; temp file deleted on close
+    is fine because sqlite holds the file handle open for the duration.
+    """
+    if not snapshot.exists():
+        sys.stderr.write(f"coo-search: snapshot not found: {snapshot}\n")
+        sys.exit(2)
+    tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    with gzip.open(snapshot, "rb") as src:
+        shutil.copyfileobj(src, tmp)
+    tmp.close()
+    conn = sqlite3.connect(tmp.name)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def query(sql: str, params: list[Any] | None = None) -> list[dict[str, Any]]:
+    """Dispatch a query to the active backend (D1 over REST or local SQLite)."""
+    if _BACKEND["kind"] == "snapshot":
+        conn: sqlite3.Connection = _BACKEND["conn"]
+        cur = conn.execute(sql, params or [])
+        rows = [dict(r) for r in cur.fetchall()]
+        return rows
+    return _d1_query(sql, params)
+
+
+def _d1_query(sql: str, params: list[Any] | None = None) -> list[dict[str, Any]]:
+    account_id = _env("CLOUDFLARE_ACCOUNT_ID")
+    db_id = _env("D1_DATABASE_ID")
+    token = _env("CLOUDFLARE_API_TOKEN")
+    url = f"{D1_API_BASE}/accounts/{account_id}/d1/database/{db_id}/query"
+    body: dict[str, Any] = {"sql": sql}
+    if params:
+        body["params"] = params
+    req = urllib.request.Request(
+        url,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+        data=json.dumps(body).encode("utf-8"),
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            obj = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        sys.stderr.write(f"coo-search: D1 HTTP {e.code}: {e.read().decode('utf-8', 'replace')}\n")
+        sys.exit(3)
+    except urllib.error.URLError as e:
+        sys.stderr.write(f"coo-search: D1 unreachable: {e}\n")
+        sys.exit(3)
+    if not obj.get("success"):
+        sys.stderr.write(f"coo-search: D1 error: {obj.get('errors')}\n")
+        sys.exit(3)
+    result = obj.get("result", [])
+    if not result:
+        return []
+    return result[0].get("results", []) or []
+
+
+def _normalize_repo(repo: str) -> str:
+    """`coo-memory` → `coo-labs/coo-memory`; pass-through if already qualified."""
+    if "/" in repo:
+        return repo
+    return f"coo-labs/{repo}"
+
+
+def _emit(rows: list[dict[str, Any]], as_json: bool, columns: list[str] | None = None) -> None:
+    if as_json:
+        json.dump(rows, sys.stdout, indent=2, default=str)
+        sys.stdout.write("\n")
+        return
+    if not rows:
+        sys.stdout.write("(no rows)\n")
+        return
+    cols = columns or list(rows[0].keys())
+    widths = {c: max(len(c), *(len(str(r.get(c, ""))) for r in rows)) for c in cols}
+    header = "  ".join(c.ljust(widths[c]) for c in cols)
+    sys.stdout.write(header + "\n")
+    sys.stdout.write("  ".join("-" * widths[c] for c in cols) + "\n")
+    for r in rows:
+        sys.stdout.write("  ".join(str(r.get(c, "")).ljust(widths[c]) for c in cols) + "\n")
+
+
+# ----- subcommands ---------------------------------------------------------
+
+def cmd_sessions(args: argparse.Namespace) -> int:
+    where: list[str] = []
+    params: list[Any] = []
+    joins: list[str] = []
+    if args.repo:
+        joins.append("JOIN session_repos sr ON sr.sid = s.sid")
+        where.append("sr.repo = ?")
+        params.append(_normalize_repo(args.repo))
+    if args.cwd:
+        joins.append("JOIN session_cwds sc ON sc.sid = s.sid")
+        where.append("sc.cwd LIKE ?")
+        params.append(f"%{args.cwd}%")
+    if args.model:
+        joins.append("JOIN session_models sm ON sm.sid = s.sid")
+        where.append("sm.model = ?")
+        params.append(args.model)
+    if args.from_:
+        where.append("s.started_at >= ?")
+        params.append(args.from_)
+    if args.to:
+        where.append("s.started_at < ?")
+        params.append(args.to)
+    sql = (
+        "SELECT DISTINCT s.sid, s.started_at, s.duration_seconds, "
+        "s.tool_call_count, s.error_count, "
+        "substr(s.first_user_preview, 1, 60) AS preview "
+        "FROM sessions s "
+        + " ".join(joins)
+    )
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY s.started_at DESC LIMIT ?"
+    params.append(args.limit)
+    rows = query(sql, params)
+    _emit(rows, args.json,
+          ["sid", "started_at", "duration_seconds", "tool_call_count", "error_count", "preview"])
+    return 0
+
+
+def cmd_tool_calls(args: argparse.Namespace) -> int:
+    if args.sid:
+        sql = (
+            "SELECT tool_name, call_count FROM session_tools "
+            "WHERE sid = ? ORDER BY call_count DESC LIMIT ?"
+        )
+        params: list[Any] = [args.sid, args.limit]
+    elif args.tool:
+        sql = (
+            "SELECT st.sid, s.started_at, st.call_count, "
+            "substr(s.first_user_preview, 1, 60) AS preview "
+            "FROM session_tools st JOIN sessions s ON s.sid = st.sid "
+            "WHERE st.tool_name = ? "
+            "ORDER BY s.started_at DESC LIMIT ?"
+        )
+        params = [args.tool, args.limit]
+    else:
+        sql = (
+            "SELECT tool_name, SUM(call_count) AS total, COUNT(DISTINCT sid) AS sessions "
+            "FROM session_tools GROUP BY tool_name ORDER BY total DESC LIMIT ?"
+        )
+        params = [args.limit]
+    rows = query(sql, params)
+    _emit(rows, args.json)
+    return 0
+
+
+def cmd_artifacts(args: argparse.Namespace) -> int:
+    where: list[str] = []
+    params: list[Any] = []
+    if args.ref:
+        # Search both URL and title — briefings/memos are referenced by name
+        # in titles more often than in URLs.
+        where.append("(sa.ref LIKE ? OR sa.title LIKE ?)")
+        params.append(f"%{args.ref}%")
+        params.append(f"%{args.ref}%")
+    if args.kind:
+        where.append("sa.kind = ?")
+        params.append(args.kind)
+    if args.sid:
+        where.append("sa.sid = ?")
+        params.append(args.sid)
+    sql = (
+        "SELECT sa.sid, sa.kind, sa.ref, sa.title, s.started_at "
+        "FROM session_artifacts sa JOIN sessions s ON s.sid = sa.sid"
+    )
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY s.started_at DESC LIMIT ?"
+    params.append(args.limit)
+    rows = query(sql, params)
+    _emit(rows, args.json)
+    return 0
+
+
+def cmd_errors(args: argparse.Namespace) -> int:
+    where: list[str] = ["s.error_count > 0"]
+    params: list[Any] = []
+    joins = ""
+    if args.repo:
+        joins = "JOIN session_repos sr ON sr.sid = s.sid"
+        where.append("sr.repo = ?")
+        params.append(_normalize_repo(args.repo))
+    if args.from_:
+        where.append("s.started_at >= ?")
+        params.append(args.from_)
+    sql = (
+        "SELECT DISTINCT s.sid, s.started_at, s.error_count, "
+        "s.tool_call_count, substr(s.first_user_preview, 1, 60) AS preview "
+        f"FROM sessions s {joins} WHERE " + " AND ".join(where) +
+        " ORDER BY s.started_at DESC LIMIT ?"
+    )
+    params.append(args.limit)
+    rows = query(sql, params)
+    _emit(rows, args.json)
+    return 0
+
+
+def cmd_files(args: argparse.Namespace) -> int:
+    """Deferred to Phase 4 — session_files isn't built yet. Fall back to a
+    scan over session_artifacts (ref + title) for refs that mention the path,
+    flag the limitation on stderr so callers know the result is approximate.
+    """
+    sys.stderr.write(
+        "coo-search: files subcommand is approximate until Phase 4 enrichment "
+        "ships session_files. Falling back to artifact-ref/title string match.\n"
+    )
+    sql = (
+        "SELECT sa.sid, sa.kind, sa.ref, sa.title, s.started_at "
+        "FROM session_artifacts sa JOIN sessions s ON s.sid = sa.sid "
+        "WHERE sa.ref LIKE ? OR sa.title LIKE ? "
+        "ORDER BY s.started_at DESC LIMIT ?"
+    )
+    limit = 1 if args.last else args.limit
+    pat = f"%{args.path}%"
+    rows = query(sql, [pat, pat, limit])
+    _emit(rows, args.json)
+    return 0
+
+
+def cmd_excerpt(args: argparse.Namespace) -> int:
+    sys.stderr.write(
+        "coo-search: excerpt subcommand is deferred to Phase 4. Direct route:\n"
+        f"  rendered HTML on R2 at rendered/{args.sid}.html\n"
+        "  fetch via coo-harness/scripts/transcript-fetch.py or the worker.\n"
+    )
+    return 4
+
+
+# ----- argparse wiring -----------------------------------------------------
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="coo-search", description=__doc__)
+    p.add_argument("--json", action="store_true", help="Emit JSON instead of a table.")
+    p.add_argument(
+        "--snapshot",
+        type=Path,
+        help=(
+            "Query a local SQLite snapshot (corpus.db.gz) instead of D1. "
+            "Useful for offline dev, disaster-recovery, and pre-provisioning runs."
+        ),
+    )
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("sessions", help="List sessions, filtered.")
+    s.add_argument("--repo", help="coo-labs/<repo> or shorthand (coo-memory).")
+    s.add_argument("--cwd", help="Substring match against session_cwds.cwd.")
+    s.add_argument("--model", help="Exact match against session_models.model.")
+    s.add_argument("--from", dest="from_", help="ISO date — sessions started_at >= this.")
+    s.add_argument("--to", help="ISO date — sessions started_at < this.")
+    s.add_argument("--limit", type=int, default=DEFAULT_LIMIT)
+    s.set_defaults(func=cmd_sessions)
+
+    t = sub.add_parser("tool-calls", help="Per-tool call counts.")
+    t.add_argument("--tool", help="Exact tool name (e.g. Bash, mcp__github__pull_request_read).")
+    t.add_argument("--sid", help="Session id — show per-tool counts for one session.")
+    t.add_argument("--limit", type=int, default=DEFAULT_LIMIT)
+    t.set_defaults(func=cmd_tool_calls)
+
+    f = sub.add_parser("files", help="(approximate until Phase 4) Sessions mentioning a path.")
+    f.add_argument("--path", required=True)
+    f.add_argument("--last", action="store_true", help="Most recent match only.")
+    f.add_argument("--limit", type=int, default=DEFAULT_LIMIT)
+    f.set_defaults(func=cmd_files)
+
+    a = sub.add_parser("artifacts", help="Artifact refs (PRs/issues/comments).")
+    a.add_argument("--ref", help="Substring match against the artifact url/ref.")
+    a.add_argument("--kind", choices=["pr", "issue", "comment"])
+    a.add_argument("--sid", help="Show artifacts for one session.")
+    a.add_argument("--limit", type=int, default=DEFAULT_LIMIT)
+    a.set_defaults(func=cmd_artifacts)
+
+    e = sub.add_parser("errors", help="Sessions with error_count > 0.")
+    e.add_argument("--repo")
+    e.add_argument("--from", dest="from_")
+    e.add_argument("--limit", type=int, default=DEFAULT_LIMIT)
+    e.set_defaults(func=cmd_errors)
+
+    x = sub.add_parser("excerpt", help="(deferred to Phase 4) Excerpt around a tool call.")
+    x.add_argument("sid")
+    x.add_argument("--around-tool-call", type=int, dest="around")
+    x.add_argument("--context", type=int, default=5)
+    x.set_defaults(func=cmd_excerpt)
+
+    h = sub.add_parser("help", help="Show top-level help, or help for a subcommand.")
+    h.add_argument("topic", nargs="?",
+                   help="Subcommand name (sessions, tool-calls, files, "
+                        "artifacts, errors, excerpt). Omit for the top-level help.")
+    h.set_defaults(func=cmd_help)
+
+    return p
+
+
+def cmd_help(args: argparse.Namespace) -> int:
+    parser = build_parser()
+    if not args.topic:
+        parser.print_help()
+        return 0
+    # Walk the subparsers action to find the named topic.
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            sub_parser = action.choices.get(args.topic)
+            if sub_parser is None:
+                sys.stderr.write(
+                    f"coo-search: unknown subcommand '{args.topic}'. "
+                    f"Known: {', '.join(sorted(action.choices))}\n"
+                )
+                return 2
+            sub_parser.print_help()
+            return 0
+    parser.print_help()
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.snapshot:
+        _BACKEND["kind"] = "snapshot"
+        _BACKEND["conn"] = _open_snapshot(args.snapshot)
+    try:
+        return int(args.func(args))
+    finally:
+        if _BACKEND["kind"] == "snapshot" and _BACKEND["conn"] is not None:
+            _BACKEND["conn"].close()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

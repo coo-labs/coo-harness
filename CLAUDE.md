@@ -55,6 +55,53 @@ bootstrap (`scripts/boot/coo-bootstrap.sh`) wires the `vade-coo` GitHub
 identity when `OP_SERVICE_ACCOUNT_TOKEN` is set in the cloud-env
 config.
 
+## Querying the transcript corpus — `bin/coo-search`
+
+`bin/coo-search` is the canonical "have I done this before?" surface.
+Queries the `coo_corpus` Cloudflare D1 database (built nightly from R2
+sidecars by the `corpus-index` Action in `coo-labs/coo-logs`; see
+coo-labs/coo-memory#1149 for Phase 3 scope, MEMO-2026-06-06-keks for
+the D1 + token-scope ack).
+
+```sh
+# Recent sessions touching coo-memory
+coo-search sessions --repo coo-memory --from 2026-06 --limit 10
+
+# Sessions that called a particular tool
+coo-search tool-calls --tool 'mcp__github__pull_request_read' --limit 10
+
+# Across-corpus tool usage
+coo-search tool-calls --limit 20
+
+# Find an artifact by ref or title (substring)
+coo-search artifacts --ref 'briefing 039'
+coo-search artifacts --kind pr --ref 'MEMO-2026-06'
+
+# Approximate "files touched" via artifact-title scan (until Phase 4)
+coo-search files --path 'coo-bootstrap.sh' --last
+
+# Sessions with errors
+coo-search errors --from 2026-06 --limit 10
+
+# Add --json for machine-readable output
+coo-search --json sessions --limit 5
+```
+
+Backends:
+
+- **D1 (default).** Reads `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`,
+  `D1_DATABASE_ID` from env. Token is the `vade-coo-2026-05` Cloudflare
+  API key (Account D1:Edit/Read scope, added 2026-06-06).
+- **Local snapshot.** Pass `--snapshot path/to/corpus.db.gz` to query the
+  gzipped SQLite mirror instead — works offline, useful for DR, and
+  doesn't need any env. Snapshot lives at `coo-logs/index/corpus.db.gz`,
+  refreshed nightly by the same Action.
+
+Deferred to a Phase 4 enrichment pass: `excerpt` (needs rendered HTML
+or jsonl access), exact `files` (needs jsonl decryption in the Action),
+token-count and cost columns. The current schema and data sources are
+documented in `coo-labs/coo-logs/index/README.md`.
+
 ## Bootstrap CI
 
 PRs that touch `scripts/`, `.claude/`, `.mcp.json`, or
