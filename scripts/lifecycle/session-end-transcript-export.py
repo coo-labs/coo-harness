@@ -95,6 +95,13 @@ REDACT_PY = RUNTIME_ROOT / "scripts" / "lib" / "transcript-redact.py"
 RECIPIENT_FILE = RUNTIME_ROOT / "scripts" / "lib" / "transcripts-recipient.age"
 REDACTION_CONFIG = RUNTIME_ROOT / "scripts" / "lib" / "transcript-redaction.json"
 
+# Locate coo-harness/lib/ on sys.path so `from transcripts import ...` resolves
+# under the uv-run venv this script spawns into. lifecycle/ is two parents up
+# from the repo root.
+sys.path.insert(0, str(RUNTIME_ROOT / "lib"))
+
+from transcripts import R2Error, r2_client, r2_coordinates  # noqa: E402
+
 
 def _stderr(msg: str) -> None:
     sys.stderr.write(f"[session-end-transcript-export] {msg}\n")
@@ -258,48 +265,14 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def _op_read(ref: str) -> str:
-    """Read a 1Password reference via the op CLI. Returns empty string
-    on any failure (caller decides whether to abort or skip)."""
-    if not shutil.which("op"):
-        return ""
-    try:
-        out = subprocess.run(
-            ["op", "read", ref],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        return out.stdout.strip()
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        return ""
-
-
-def _r2_endpoint_bucket() -> tuple[str, str]:
-    """Resolve R2 endpoint + bucket via `op` once.
-
-    Callers that PUT twice (ciphertext + flat-key meta) should resolve
-    once here and pass the values into `_r2_upload` to avoid duplicate
-    `op` invocations. Raises if either slot is empty.
-    """
-    endpoint = _op_read("op://COO/r2-transcripts/endpoint")
-    bucket = _op_read("op://COO/r2-transcripts/bucket")
-    if not endpoint or not bucket:
-        raise RuntimeError(
-            "R2 endpoint or bucket not readable from "
-            "op://COO/r2-transcripts/{endpoint,bucket}"
-        )
-    return endpoint, bucket
-
-
 def _r2_upload(
     local: Path,
     key: str,
     *,
     metadata: dict[str, str] | None = None,
-    endpoint: str | None = None,
-    bucket: str | None = None,
+    s3,
+    bucket: str,
+    endpoint: str,
 ) -> dict:
     """Upload a local file to R2 at the given key with first-write-wins
     semantics. Returns a dict with bucket+key+endpoint for the sidecar
@@ -328,15 +301,6 @@ def _r2_upload(
     server-side before commit, so a 412 cede leaves no metadata
     behind either.
     """
-    access_key = os.environ.get("R2_TRANSCRIPTS_ACCESS_KEY_ID", "").strip()
-    secret_key = os.environ.get("R2_TRANSCRIPTS_SECRET_ACCESS_KEY", "").strip()
-    if not access_key or not secret_key:
-        raise RuntimeError(
-            "R2_TRANSCRIPTS_ACCESS_KEY_ID / R2_TRANSCRIPTS_SECRET_ACCESS_KEY "
-            "missing — fetch_coo_secrets did not populate them"
-        )
-    if endpoint is None or bucket is None:
-        endpoint, bucket = _r2_endpoint_bucket()
     if metadata is not None:
         # R2 user-metadata is ISO-8859-1 string-only; ascii-encoded JSON
         # caller-side keeps that constraint trivially.
@@ -344,21 +308,7 @@ def _r2_upload(
             "R2 user-metadata values must be strings"
         )
 
-    import boto3  # imported lazily — uv resolves on first run
-    from botocore.config import Config
     from botocore.exceptions import ClientError
-
-    s3 = boto3.client(
-        "s3",
-        endpoint_url=endpoint,
-        aws_access_key_id=access_key,
-        aws_secret_access_key=secret_key,
-        region_name="auto",
-        config=Config(
-            signature_version="s3v4",
-            retries={"max_attempts": 3, "mode": "standard"},
-        ),
-    )
 
     put_kwargs = {
         "Bucket": bucket,
@@ -384,7 +334,7 @@ def _r2_upload(
 def _r2_head_object_metadata(
     key: str,
     *,
-    endpoint: str,
+    s3,
     bucket: str,
 ) -> dict[str, str] | None:
     """Fetch R2 user-metadata for an existing key via head_object.
@@ -399,26 +349,7 @@ def _r2_head_object_metadata(
     Returns the lowercased Metadata dict on success, None on any failure
     (caller falls back to breadcrumb-only behavior).
     """
-    access_key = os.environ.get("R2_TRANSCRIPTS_ACCESS_KEY_ID", "").strip()
-    secret_key = os.environ.get("R2_TRANSCRIPTS_SECRET_ACCESS_KEY", "").strip()
-    if not access_key or not secret_key:
-        return None
-
     try:
-        import boto3
-        from botocore.config import Config
-
-        s3 = boto3.client(
-            "s3",
-            endpoint_url=endpoint,
-            aws_access_key_id=access_key,
-            aws_secret_access_key=secret_key,
-            region_name="auto",
-            config=Config(
-                signature_version="s3v4",
-                retries={"max_attempts": 3, "mode": "standard"},
-            ),
-        )
         resp = s3.head_object(Bucket=bucket, Key=key)
         return resp.get("Metadata") or {}
     except BaseException:
@@ -783,6 +714,7 @@ def main() -> int:
             if dry_run:
                 r2_endpoint = "<dry-run>"
                 r2_bucket = "<dry-run>"
+                s3 = None
                 r2_target = {
                     "bucket": r2_bucket,
                     "key": r2_key,
@@ -791,7 +723,10 @@ def main() -> int:
                     "meta_key": meta_r2_key,
                 }
             else:
-                r2_endpoint, r2_bucket = _r2_endpoint_bucket()
+                coords = r2_coordinates()
+                r2_endpoint = coords.endpoint
+                r2_bucket = coords.bucket
+                s3 = r2_client(coords)
                 r2_target = {
                     "bucket": r2_bucket,
                     "key": r2_key,
@@ -842,7 +777,7 @@ def main() -> int:
                 upload = _r2_upload(
                     ciphertext, r2_key,
                     metadata=embed_metadata,
-                    endpoint=r2_endpoint, bucket=r2_bucket,
+                    s3=s3, bucket=r2_bucket, endpoint=r2_endpoint,
                 )
                 # First-write-wins cede (coo-harness#204): another writer
                 # already holds this R2 key. Our ciphertext_sha256 does NOT
@@ -854,7 +789,7 @@ def main() -> int:
                 # discoverable through every navigation path (coo-harness#416).
                 if upload.get("ceded"):
                     md = _r2_head_object_metadata(
-                        r2_key, endpoint=r2_endpoint, bucket=r2_bucket,
+                        r2_key, s3=s3, bucket=r2_bucket,
                     )
                     embed = (md or {}).get("vade-meta-json", "")
                     recovered: dict | None = None
@@ -896,7 +831,7 @@ def main() -> int:
                 try:
                     meta_upload = _r2_upload(
                         meta_temp, meta_r2_key,
-                        endpoint=r2_endpoint, bucket=r2_bucket,
+                        s3=s3, bucket=r2_bucket, endpoint=r2_endpoint,
                     )
                     if meta_upload.get("ceded"):
                         _stderr(
