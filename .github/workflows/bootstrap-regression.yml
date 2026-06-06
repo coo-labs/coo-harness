@@ -238,6 +238,17 @@ jobs:
       - name: Transcript redaction engine — corpus + thinking + negative tests
         run: python3 "$GITHUB_WORKSPACE/scripts/ci/test-transcript-redaction.py"
 
+      - name: Redaction-schema drift — transcript-redaction.json vs coo-memory secret_shapes
+        # Cross-references each JSON pattern's `schema_shape` annotation
+        # against schema.yaml::secret_shapes. The primary catch is the
+        # interactive session where coo-memory is symlinked at /home/user;
+        # CI runs --allow-skip because the bootstrap-regression runner has
+        # no cross-org checkout of coo-memory. The check still runs
+        # locally as a hard gate before PR open. Closes coo-labs/coo-harness#361.
+        run: |
+          pip install --quiet pyyaml
+          python3 "$GITHUB_WORKSPACE/scripts/ci/check-redaction-schema-drift.py" --allow-skip
+
       - name: Install age (apt)
         run: sudo apt-get install -y --no-install-recommends age
 
