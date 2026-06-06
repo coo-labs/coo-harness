@@ -1,18 +1,29 @@
 #!/usr/bin/env bash
 # CI tests for boot-brake-guard.py + boot-brake-clear.sh.
 #
-# Covers v2 §7 tests 1, 2, 3, 6, 7, 9 (Phase 0 minimum), plus four
-# regression tests for the post-review patches:
+# Covers v2 §7 tests 1, 2, 3, 5, 6, 7, 8, 9, 10 (Phase 0 minimum + the
+# Phase 1 deferred trio landed for coo-memory#1174 TST1), plus the
+# post-review regression patches:
 #
 #   1.  Per-producer fault injection — each manifest entry, missing.
 #   2.  PreToolUse refusal smoke — block-on-FAIL + FAIL → deny.
 #   3.  Whitelist allows diagnostics — Read + Grep in FAIL state.
+#   5.  (Phase 1) Manifest static cross-check — each entry's path
+#       basename appears in its producer source; read_observed
+#       entries' check_arg regex matches the producer string.
 #   6.  Sub-agent isolation — Task denied; override does not propagate
 #       to different session_id.
 #   7.  Parallel-session isolation — sentinels keyed per-session AND
 #       cache-invalidation: a cached OK does NOT survive deletion of
 #       a previously-OK deliverable (Sys-Eng C1 regression test).
+#   8.  (Phase 1) Prompt-injection sanitization — a malicious manifest
+#       field cannot reach the agent's deny-reason context with shell
+#       metachars or instruction-injection text intact.
 #   9.  Unparseable sentinel re-validates + writes fault diagnostic.
+#   10. (Phase 1) Legacy-format collision — brake's deny output is
+#       canonical modern PreToolUse shape with no legacy keys; the
+#       full Claude-Code chain-merge empirical check is opt-in via
+#       VADE_TEST_LEGACY_COLLISION=1 + CLAUDE_BIN.
 #   11. (new) Manifest unreadable (pyyaml-fault simulated) → self-fault
 #       sentinel + cause=validator_self_fault event (Sys-Eng C2).
 #   12. (new) Race gate engaged — first PreToolUse while producers are
@@ -938,6 +949,271 @@ else
     # Some other deliverable might be missing — that's fine, not our test.
     _pass "well-formed has_jq_path didn't trip O15 syntax check (any deny is for other deliverables)"
   fi
+fi
+
+# ─── Test 5 (v2 §7): manifest static cross-check ────────────────
+# Each manifest entry's path substring appears in its producer source.
+# Catches the regression where someone renames a deliverable file but
+# forgets to update the manifest, or vice versa. Two sub-checks:
+#
+#   (a) check_kind ≠ read_observed: basename(path) appears in producer
+#       source. Only runs for producers that exist on disk in this CI
+#       context (coo-harness producers always; coo-memory producers
+#       skipped because the CI stage only ships a stub coo-memory).
+#   (b) check_kind = read_observed: the check_arg regex matches the
+#       producer path. The producer for *_consumed entries IS the file
+#       the agent must Read; the regex on check_arg is what the guard
+#       uses to detect that Read. Misalignment = silent test bypass.
+#
+# Runs against the manifest the brake actually loads
+# ($VADE_COO_MEMORY_DIR/operations/boot-deliverables.yml), so this tests
+# the same artifact production CI exercises. Per coo-memory#1174 TST1.
+echo "Test 5 — manifest static cross-check (v2 §7 #5)"
+t5_manifest="$COO_MEMORY_DIR/operations/boot-deliverables.yml"
+if [ ! -f "$t5_manifest" ]; then
+  _fail "manifest not found at $t5_manifest"
+else
+  t5_result="$(MANIFEST="$t5_manifest" REPO_ROOT_HARNESS="$REPO_ROOT" REPO_ROOT_MEMORY="$COO_MEMORY_DIR" python3 -c '
+import os, re, sys
+try:
+    import yaml
+except ImportError:
+    print("SKIP pyyaml-missing")
+    sys.exit(0)
+with open(os.environ["MANIFEST"]) as fh:
+    m = yaml.safe_load(fh)
+ok = []
+bad = []
+skipped = []
+for e in m.get("deliverables", []):
+    eid = e.get("id", "?")
+    kind = e.get("check_kind", "exists")
+    path = e.get("path", "")
+    producer = e.get("producer", "")
+    # Resolve producer path: harness-prefixed → REPO_ROOT_HARNESS;
+    # memory-prefixed → REPO_ROOT_MEMORY; absolute → as-is.
+    if producer.startswith("coo-harness/"):
+        prod_path = os.path.join(os.environ["REPO_ROOT_HARNESS"], producer[len("coo-harness/"):])
+    elif producer.startswith("coo-memory/"):
+        prod_path = os.path.join(os.environ["REPO_ROOT_MEMORY"], producer[len("coo-memory/"):])
+    elif producer.startswith("/"):
+        prod_path = producer
+    else:
+        prod_path = producer
+    if kind == "read_observed":
+        # (b) the regex must match the producer path.
+        arg = e.get("check_arg", "")
+        try:
+            rx = re.compile(arg)
+        except re.error as exc:
+            bad.append(f"{eid}: bad regex {arg!r}: {exc}")
+            continue
+        # producer for *_consumed entries is the canonical file path; the
+        # regex is anchored on the path tail. Match against the producer
+        # string itself.
+        if rx.search(producer):
+            ok.append(f"{eid} (regex match)")
+        elif eid == "identity_consumed":
+            # identity_consumed has predicate-gated path and a tool-results
+            # regex; producer is the digest script, not a file the regex
+            # targets. Documented dynamic path; cross-check is via the
+            # predicate_exists_glob instead — substring of the glob.
+            glob = e.get("predicate_exists_glob", "")
+            if "tool-results" in glob and "hook-" in arg:
+                ok.append(f"{eid} (predicate↔regex shape match)")
+            else:
+                bad.append(f"{eid}: predicate/regex shape mismatch (glob={glob!r}, arg={arg!r})")
+        else:
+            bad.append(f"{eid}: regex {arg!r} does not match producer {producer!r}")
+        continue
+    # (a) basename(path) appears in producer source.
+    base = os.path.basename(path)
+    if not base or path == "dynamic":
+        skipped.append(f"{eid}: no usable basename")
+        continue
+    if not os.path.isfile(prod_path):
+        skipped.append(f"{eid}: producer source not present in CI context ({prod_path})")
+        continue
+    try:
+        with open(prod_path) as fh:
+            src = fh.read()
+    except Exception as exc:
+        bad.append(f"{eid}: cannot read producer {prod_path}: {exc}")
+        continue
+    if base in src:
+        ok.append(f"{eid} ({base} in {producer})")
+    else:
+        bad.append(f"{eid}: {base!r} not found in {producer}")
+print("OK", len(ok))
+print("BAD", len(bad))
+print("SKIP", len(skipped))
+for line in bad:
+    print("  BAD:", line)
+for line in skipped:
+    print("  skip:", line)
+sys.exit(1 if bad else 0)
+' 2>&1)" && t5_rc=0 || t5_rc=$?
+  if [ "$t5_rc" = "0" ]; then
+    t5_ok="$(printf '%s\n' "$t5_result" | awk '/^OK/ {print $2}')"
+    t5_skip="$(printf '%s\n' "$t5_result" | awk '/^SKIP/ {print $2}')"
+    if [ "${t5_ok:-0}" -ge 1 ]; then
+      _pass "manifest cross-check: $t5_ok entries verified, $t5_skip skipped"
+    else
+      _fail "manifest cross-check: 0 entries verified (everything skipped?). Output: $t5_result"
+    fi
+  else
+    _fail "manifest cross-check failed: $t5_result"
+  fi
+fi
+
+# ─── Test 8 (v2 §7): prompt-injection sanitization ──────────────
+# A malicious manifest field (deliverable id or producer name) must not
+# reach the agent's deny-reason context with shell metachars or
+# instruction-injection text intact. The guard's sanitize() restricts
+# interpolated values to [A-Za-z0-9 ._/:-]; this test confirms the
+# restriction holds end-to-end through the deny path.
+#
+# Per coo-memory#1174 TST1. v2 §4 (R2#6).
+echo "Test 8 — prompt-injection sanitization (v2 §7 #8)"
+set -- $(echo "$(_setup_session_dirs "t8")" | tr '|' ' ')
+state_dir="$1"; home_dir="$2"
+_make_all_deliverables_present "$state_dir" "$home_dir" "t8"
+# Stage a custom manifest with a deliverable id containing forbidden
+# chars: shell metachars (;`$|&), backslashes, parens, brackets, and
+# an instruction-injection phrase using non-safe-set punctuation.
+t8_manifest_dir="$TEST_ROOT/t8-manifest"
+mkdir -p "$t8_manifest_dir/operations"
+cat > "$t8_manifest_dir/operations/boot-deliverables.yml" <<'EOF'
+manifest_version: 99
+deliverables:
+  - id: "inject;`$|&\\(){}<>ignore=previous"
+    path: /tmp/t8-deliverable-that-does-not-exist
+    check_kind: exists
+    producer: "producer;`$(rm)<inject>"
+    severity: critical
+EOF
+out8="$(VADE_COO_MEMORY_DIR_OVERRIDE="$t8_manifest_dir" \
+  _invoke_guard t8 Bash block-on-FAIL "$state_dir" "$home_dir" "ls")"
+# Extract permissionDecisionReason — the actual string the agent sees in
+# its tool-feedback context. Sanitization is asserted on THIS value, not
+# on the JSON envelope ({ } are structural in the envelope and must be
+# permitted there).
+t8_reason="$(printf '%s' "$out8" | python3 -c '
+import json, sys
+try:
+    d = json.loads(sys.stdin.read())
+    print(d["hookSpecificOutput"]["permissionDecisionReason"])
+except Exception as e:
+    print(f"PARSE_ERR:{e}")
+')"
+t8_violations=""
+for ch in ';' '`' '$' '|' '&' '(' ')' '{' '}' '<' '>' '=' '\\'; do
+  if printf '%s' "$t8_reason" | grep -qF "$ch"; then
+    t8_violations="$t8_violations $ch"
+  fi
+done
+if [ -z "$t8_violations" ]; then
+  _pass "deny reason strips shell metachars from interpolated values"
+else
+  _fail "deny reason contains forbidden chars:$t8_violations  Reason: $t8_reason"
+fi
+# Confirm the injection text was actually stripped (not just absent
+# because the test sample didn't contain it). The injected id was
+# 'inject;\`\$|&\\(){}<>ignore=previous'; after sanitization only the
+# safe chars [A-Za-z0-9] survive → "injectignoreprevious".
+if printf '%s' "$t8_reason" | grep -q "injectignoreprevious"; then
+  _pass "injected id collapsed to safe-charset residue (proves sanitize fired, not just absent input)"
+else
+  _fail "expected sanitized id 'injectignoreprevious' not found in reason: $t8_reason"
+fi
+# Positive sanity: the deny output is still a well-formed deny.
+if printf '%s' "$out8" | grep -q '"permissionDecision":[[:space:]]*"deny"'; then
+  _pass "deny is still emitted (sanitization does not break the deny path)"
+else
+  _fail "no deny emitted — sanitization broke the deny path. Output: $out8"
+fi
+
+# ─── Test 10 (v2 §7): legacy-format collision ───────────────────
+# Modern PreToolUse outputs hookSpecificOutput.permissionDecision. Legacy
+# outputs {"decision":"block"|"approve"}. v2 §4 (R1#1) requires
+# empirical verification that on the actual Claude Code build, when
+# sibling hooks emit one of each shape, most-restrictive wins.
+#
+# The brake guard's output shape is asserted here as a structural unit
+# test (the half we CAN do in-process). The full Claude-Code-chain
+# empirical check runs only when both CLAUDE_BIN points at a callable
+# claude binary AND VADE_TEST_LEGACY_COLLISION=1 — gated so CI skips
+# cleanly without a binary in scope. The operator procedure is
+# documented inline below.
+#
+# Per coo-memory#1174 TST1.
+echo "Test 10 — legacy-format collision: brake output shape + optional empirical (v2 §7 #10)"
+set -- $(echo "$(_setup_session_dirs "t10")" | tr '|' ' ')
+state_dir="$1"; home_dir="$2"
+# (a) Structural: brake's deny output is canonical modern format,
+# carries no legacy keys that would create ambiguity in chain-merge.
+out10="$(_invoke_guard t10 Bash block-on-FAIL "$state_dir" "$home_dir" "ls")"
+t10_shape="$(printf '%s' "$out10" | python3 -c '
+import json, sys
+try:
+    d = json.loads(sys.stdin.read())
+except Exception as e:
+    print(f"PARSE_ERR:{e}")
+    sys.exit(0)
+hso = d.get("hookSpecificOutput") or {}
+flags = []
+if hso.get("hookEventName") == "PreToolUse":
+    flags.append("hookEventName=PreToolUse")
+if hso.get("permissionDecision") == "deny":
+    flags.append("permissionDecision=deny")
+if isinstance(hso.get("permissionDecisionReason"), str) and hso["permissionDecisionReason"]:
+    flags.append("permissionDecisionReason=non-empty")
+# Legacy keys that would make chain-merge ambiguous if present.
+for legacy in ("decision", "approve", "block", "message"):
+    if legacy in d:
+        flags.append(f"LEGACY_KEY:{legacy}")
+print(" ".join(flags) if flags else "NO_FLAGS")
+')"
+case "$t10_shape" in
+  "hookEventName=PreToolUse permissionDecision=deny permissionDecisionReason=non-empty")
+    _pass "brake deny is canonical modern PreToolUse shape; no legacy keys" ;;
+  *LEGACY_KEY:*)
+    _fail "brake deny carries legacy key — chain-merge ambiguity risk: $t10_shape" ;;
+  *)
+    _fail "brake deny shape unexpected: $t10_shape" ;;
+esac
+# (b) Empirical (opt-in): if a claude binary is available, exercise the
+# documented most-restrictive-wins behavior with two sibling hooks (one
+# legacy block + one modern allow) and observe deny on the tool call.
+# Stays a manual operator gate until a CI runner ships Claude Code.
+t10_claude_bin="${CLAUDE_BIN:-$(command -v claude 2>/dev/null || true)}"
+if [ "${VADE_TEST_LEGACY_COLLISION:-0}" = "1" ] && [ -n "$t10_claude_bin" ] && [ -x "$t10_claude_bin" ]; then
+  echo "  running empirical legacy/modern collision check against $t10_claude_bin"
+  t10_collide_dir="$TEST_ROOT/t10-collide"
+  rm -rf "$t10_collide_dir"
+  mkdir -p "$t10_collide_dir/.claude"
+  cat > "$t10_collide_dir/.claude/settings.json" <<EOF
+{
+  "hooks": {
+    "PreToolUse": [
+      {"matcher": "Bash", "hooks": [
+        {"type": "command", "command": "printf '%s' '{\"decision\":\"block\",\"message\":\"legacy block\"}'"},
+        {"type": "command", "command": "printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"allow\",\"permissionDecisionReason\":\"\"}}'"}
+      ]}
+    ]
+  }
+}
+EOF
+  # Try a headless tool invocation; capture exit/stderr. Treat presence
+  # of "block" / "deny" / non-zero rc as evidence the deny path won.
+  t10_emp="$(cd "$t10_collide_dir" && "$t10_claude_bin" -p 'run: ls /tmp' 2>&1 || true)"
+  if printf '%s' "$t10_emp" | grep -qiE 'block|deny|denied|refused|legacy block'; then
+    _pass "empirical: legacy block + modern allow → deny wins (claude output mentions block/deny)"
+  else
+    _fail "empirical: collision did not deny (claude output: $(printf '%s' "$t10_emp" | head -c 400))"
+  fi
+else
+  _pass "empirical legacy/modern collision: skipped (set VADE_TEST_LEGACY_COLLISION=1 + claude on PATH to run)"
 fi
 
 # ─── Summary ────────────────────────────────────────────────────
