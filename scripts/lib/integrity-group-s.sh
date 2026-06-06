@@ -506,34 +506,28 @@ s_check_S5() {
   # Path is overridable via $VADE_S5_SETTINGS_JSON_OVERRIDE for test fixtures
   # (CI fake-env, integrity-group-s test harness); production uses the literal
   # /root path.
+  #
+  # The "what counts as non-secret" allowlist + prefix list are loaded from
+  # schema.yaml (canonical source per coo-labs/coo-memory#1268). No hardcoded
+  # copy lives here.
   local sj="${VADE_S5_SETTINGS_JSON_OVERRIDE:-/root/.claude/settings.json}"
+  local s5_allowlist_json s5_prefixes_json
+  s5_allowlist_json="$(yq -r '.non_secret_env_allowlist // [] | tojson' "$schema" 2>/dev/null)" || s5_allowlist_json='[]'
+  s5_prefixes_json="$(yq -r '.non_secret_env_prefixes // [] | tojson' "$schema" 2>/dev/null)" || s5_prefixes_json='[]'
   if [ -f "$sj" ] && command -v node >/dev/null 2>&1; then
     checks=$((checks + 1))
     local env_values
-    env_values="$(node -e '
+    env_values="$(VADE_S5_ALLOWLIST="$s5_allowlist_json" VADE_S5_PREFIXES="$s5_prefixes_json" node -e '
       const fs = require("fs");
       let c = {};
       try { c = JSON.parse(fs.readFileSync(process.argv[1], "utf8")) || {}; } catch { process.exit(0); }
       const env = c.env || {};
-      // Non-secret env vars per non_secret_env_allowlist: skip their values
-      // to avoid false positives (CLOUDFLARE_ACCOUNT_ID matches agentmail shape,
-      // PATH/NODE_PATH matches various patterns, etc.).
-      const nonSecretKeys = new Set([
-        "HOME","USER","PATH","LANG","LC_ALL","TERM","PWD",
-        "CLAUDE_PROJECT_DIR","VADE_CLOUD_STATE_DIR","VADE_RUNTIME_DIR","VADE_COO_MEMORY_DIR",
-        "GITHUB_APP_ID","VADE_COO_APP_ID","CLOUDFLARE_ACCOUNT_ID",
-        "GITHUB_APP_INSTALLATION_ID",
-        "NODE_PATH","PLAYWRIGHT_BROWSERS_PATH","UV_CACHE_DIR","PYTHONUSERBASE","VADE_BINDIR","VADE_BRAKE_ENFORCE","VADE_BRAKE_MANIFEST_SHA256",
-        "GIT_AUTHOR_NAME","GIT_AUTHOR_EMAIL","GIT_COMMITTER_NAME","GIT_COMMITTER_EMAIL",
-        "CLAUDE_STREAM_IDLE_TIMEOUT_MS","CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS",
-        "CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS","ENABLE_CLAUDEAI_MCP_SERVERS",
-      ]);
-      // Emit values of non-allowlist keys only
+      const allowlist = new Set(JSON.parse(process.env.VADE_S5_ALLOWLIST || "[]"));
+      const prefixes = JSON.parse(process.env.VADE_S5_PREFIXES || "[]");
       for (const [k, v] of Object.entries(env)) {
-        if (!nonSecretKeys.has(k) && !k.startsWith("CLAUDE_") && !k.startsWith("CLAUDE_CODE_")
-            && !k.startsWith("GIT_") && v && typeof v === "string") {
-          process.stdout.write(v + "\n");
-        }
+        if (allowlist.has(k)) continue;
+        if (prefixes.some(p => k.startsWith(p))) continue;
+        if (v && typeof v === "string") process.stdout.write(v + "\n");
       }
     ' "$sj" 2>/dev/null)"
     local found_in_settings=0

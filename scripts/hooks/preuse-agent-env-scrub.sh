@@ -59,56 +59,27 @@ schema_path = sys.argv[1]
 subagent_type = sys.argv[2]
 
 # ── Load schema ────────────────────────────────────────────────────────────────
+# PyYAML is the canonical reader for schema.yaml across the COO substrate
+# (coo-labs/coo-memory#1268). Fail-open on import error — the hook's posture
+# is fail-open on any missing dependency.
+try:
+    import yaml
+except ImportError as e:
+    print(f"FAIL_OPEN\tpyyaml-not-importable: {e}")
+    sys.exit(0)
+
 allowlist = []
 prefixes = []
 secret_vars = []
 
 try:
     with open(schema_path) as f:
-        content = f.read()
-
-    # Parse non_secret_env_allowlist
-    in_allowlist = False
-    for line in content.split('\n'):
-        stripped = line.lstrip()
-        if re.match(r'non_secret_env_allowlist\s*:', stripped):
-            in_allowlist = True
-            continue
-        if in_allowlist:
-            m = re.match(r'-\s+([A-Za-z_][A-Za-z0-9_]*)', stripped)
-            if m:
-                allowlist.append(m.group(1))
-            elif stripped and not stripped.startswith('#'):
-                in_allowlist = False
-
-    # Parse non_secret_env_prefixes
-    in_prefixes = False
-    for line in content.split('\n'):
-        stripped = line.lstrip()
-        if re.match(r'non_secret_env_prefixes\s*:', stripped):
-            in_prefixes = True
-            continue
-        if in_prefixes:
-            m = re.match(r'-\s+([A-Za-z_][A-Za-z0-9_]*)', stripped)
-            if m:
-                prefixes.append(m.group(1))
-            elif stripped and not stripped.startswith('#'):
-                in_prefixes = False
-
-    # Parse credentials[].env_aliases (secret vars — these must NOT cross)
-    in_env_aliases = False
-    for line in content.split('\n'):
-        stripped = line.lstrip()
-        if re.match(r'env_aliases\s*:', stripped):
-            in_env_aliases = True
-            continue
-        if in_env_aliases:
-            m = re.match(r'-\s+([A-Za-z_][A-Za-z0-9_]*)', stripped)
-            if m:
-                secret_vars.append(m.group(1))
-            elif stripped and not stripped.startswith('#'):
-                in_env_aliases = False
-
+        s = yaml.safe_load(f) or {}
+    allowlist = list(s.get('non_secret_env_allowlist', []) or [])
+    prefixes = list(s.get('non_secret_env_prefixes', []) or [])
+    for cred in s.get('credentials', []) or []:
+        for alias in cred.get('env_aliases', []) or []:
+            secret_vars.append(alias)
 except Exception as e:
     # Fail-open: no schema data loaded; allow spawn unmodified
     print(f"FAIL_OPEN\tschema-load-error: {e}")
