@@ -157,7 +157,7 @@ to R2 at `vade-agent-transcripts/console-traces/<run-id>/data.json`
 The Console's `/trace/` React route fetches the same data blob and
 renders the timeline live, replacing the static-HTML flow above.
 
-Auth: bearer token from `op://COO/console-token-2026-05/credential`
+Auth: bearer token from `op://COO/console-bearer-ven/credential`
 (or set `CONSOLE_TOKEN` in env). The R2 prefix is auth-gated on both
 read and write. Pass `--dry-run` to parse + validate without uploading.
 `--data-json <path>` skips parsing and uploads a pre-rendered blob —
