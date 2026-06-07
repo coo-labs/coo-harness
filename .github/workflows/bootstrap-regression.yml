@@ -39,7 +39,8 @@ name: Bootstrap regression
 #                              fault injection (coo-memory#1250
 #                              Layer-1.5).
 #   R10 PAT-cache freshness    Silent gh-write detection on stale PAT
-#                              cache (memo -r9rt). No test exists yet.
+#                              cache (memo -r9rt). Covered by
+#                              test-check-pat-freshness.sh.
 #   R11 hook + wrapper         Per-script smoke tests for individual
 #       contracts              hooks under scripts/hooks/ and wrappers
 #                              under scripts/{gh,op,git}-*.
@@ -236,6 +237,10 @@ jobs:
 
       - name: materialize_mcp_env (tmpfs MCP env templates; no op:// refs at boot)
         run: bash "$GITHUB_WORKSPACE/scripts/ci/test-materialize-mcp-env.sh"
+
+      # ── PAT-cache freshness (R10) ────────────────────────────
+      - name: check-pat-freshness — diagnostic contract (4 exit codes + stdout shapes)
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/test-check-pat-freshness.sh"
 
       # ── Transcript + lifecycle (R11) ─────────────────────────
       - name: Transcript redaction engine — corpus + thinking + negative tests
