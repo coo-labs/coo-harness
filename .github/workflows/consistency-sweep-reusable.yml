@@ -1,0 +1,378 @@
+name: Consistency sweep (reusable)
+
+# Per-epic cross-artifact-consistency sweep. Closes coo-memory#929.
+#
+# Canonical home: coo-labs/coo-harness/.github/workflows/consistency-sweep-reusable.yml
+# Operations doc: coo-labs/coo-memory:operations/consistency-sweep/README.md
+# Strategy:       coo-labs/coo-memory:operations/ci-strategy.md
+# Paired memo:    MEMO-2026-06-07-s364
+# Lifecycle:      coo-labs/coo-memory:operations/ci-lifecycle/log.jsonl (check_id=consistency-sweep)
+# Schema:         coo-labs/coo-harness:config/ci-health/schema.yaml (consistency-sweep entry)
+#
+# Four-slot answers (per ci-strategy §"The four-slot question"):
+#   1. Guarantee:           G2 drift-watch (per-epic within-content scope)
+#   2. Loop position:       at-PR-open+cron (PR detection + monthly cron)
+#   3. Retirement criterion: defense-in-depth-perpetual (permanent per-epic backstop)
+#   4. Owner:               vade-coo
+#
+# Trigger contract for callers (thin trigger in consumer repo):
+#   on:
+#     pull_request:
+#       types: [opened, edited, reopened, synchronize, labeled]
+#     schedule:
+#       - cron: '0 3 1 * *'    # 03:00 UTC, 1st of every month
+#     workflow_dispatch:
+#       inputs:
+#         epic-slug:
+#           description: 'Epic slug (folder name under audits/) for ad-hoc re-run'
+#           required: true
+#           type: string
+#   permissions:
+#     contents: read
+#     pull-requests: write
+#     issues: read
+#     id-token: write
+#     statuses: write
+#   jobs:
+#     sweep:
+#       uses: coo-labs/coo-harness/.github/workflows/consistency-sweep-reusable.yml@main
+#       secrets: inherit
+#
+# Detection (per commission §3, ci-strategy G2 primary loop position):
+#   Primary (heuristic): PR carries closing keyword for an Epic-typed issue.
+#     GraphQL subIssues query confirms it's the last open sub-issue (or the
+#     PR closes the Epic itself).
+#   Fallback (explicit): PR carries label `epic-last-pr` (author self-applied).
+#   Cron: iterate every audits/*/file-collection.md; dispatch per-epic.
+#   Manual: workflow_dispatch with epic-slug.
+#
+# Loud-fail (blocking): epic detected but sweep-protocol.md or
+# file-collection.md missing under audits/<epic-slug>/. Hygiene violation
+# per commission §"Load-bearing constraints".
+#
+# Agent dispatch: anthropics/claude-code-action@v1 with claude-sonnet-4-6.
+# Cost budget per commission §"Cost discipline": ~$0.50/sweep target,
+# ~$2/sweep ceiling. Tracked in operations/consistency-sweep/cost-baseline.md.
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: read
+  id-token: write
+  statuses: write
+
+concurrency:
+  group: consistency-sweep-${{ github.repository }}-${{ github.event.pull_request.number || github.event.inputs.epic-slug || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      epics: ${{ steps.detect.outputs.epics }}
+      trigger: ${{ steps.detect.outputs.trigger }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect epics to sweep
+        id: detect
+        uses: actions/github-script@v7
+        env:
+          DISPATCH_EPIC_SLUG: ${{ github.event.inputs.epic-slug }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            const findFileCollections = () => {
+              const collections = [];
+              const auditsDir = 'audits';
+              if (!fs.existsSync(auditsDir)) return collections;
+              for (const entry of fs.readdirSync(auditsDir, { withFileTypes: true })) {
+                if (!entry.isDirectory()) continue;
+                const fc = path.join(auditsDir, entry.name, 'file-collection.md');
+                const sp = path.join(auditsDir, entry.name, 'sweep-protocol.md');
+                if (fs.existsSync(fc) && fs.existsSync(sp)) {
+                  collections.push({ slug: entry.name, fileCollection: fc, sweepProtocol: sp });
+                }
+              }
+              return collections;
+            };
+
+            const parseEpicFromCollection = (filePath) => {
+              const body = fs.readFileSync(filePath, 'utf8');
+              const m = body.match(/\|\s*epic\s*\|\s*\[?coo-labs\/([a-z0-9-]+)#(\d+)\]?/i);
+              if (!m) return null;
+              return { repo: m[1], number: parseInt(m[2], 10) };
+            };
+
+            const eventName = context.eventName;
+            const allCollections = findFileCollections();
+            core.info(`Found ${allCollections.length} candidate epic(s) with sweep-protocol+file-collection`);
+
+            const epicsToSweep = [];
+            let trigger = 'unknown';
+
+            if (eventName === 'workflow_dispatch') {
+              trigger = 'manual';
+              const slug = process.env.DISPATCH_EPIC_SLUG;
+              const match = allCollections.find(c => c.slug === slug);
+              if (!match) {
+                core.setFailed(`workflow_dispatch: epic-slug "${slug}" not found under audits/`);
+                return;
+              }
+              epicsToSweep.push(match);
+            } else if (eventName === 'schedule') {
+              trigger = 'cron';
+              epicsToSweep.push(...allCollections);
+            } else if (eventName === 'pull_request') {
+              trigger = 'pr-event';
+              const pr = context.payload.pull_request;
+              const body = pr.body || '';
+              const title = pr.title || '';
+              const labels = (pr.labels || []).map(l => l.name);
+
+              const hasLabel = labels.includes('epic-last-pr');
+
+              const closeRe = /\b(clos(?:e|es|ed|ing)|fix(?:es|ed|ing)?|resolv(?:e|es|ed|ing))\s+(?:coo-labs\/([a-z0-9-]+)#|#)(\d+)\b/gi;
+              const closingTargets = [];
+              for (const text of [title, body]) {
+                let m;
+                const re = new RegExp(closeRe.source, closeRe.flags);
+                while ((m = re.exec(text)) !== null) {
+                  const repo = m[2] || context.repo.repo;
+                  const number = parseInt(m[3], 10);
+                  closingTargets.push({ repo, number });
+                }
+              }
+
+              for (const target of closingTargets) {
+                try {
+                  const epicQ = await github.graphql(`
+                    query($owner: String!, $repo: String!, $number: Int!) {
+                      repository(owner: $owner, name: $repo) {
+                        issue(number: $number) {
+                          issueType { name }
+                          subIssues(first: 50) {
+                            totalCount
+                            nodes { state }
+                          }
+                        }
+                      }
+                    }
+                  `, { owner: context.repo.owner, repo: target.repo, number: target.number });
+
+                  const issue = epicQ?.repository?.issue;
+                  if (!issue) continue;
+                  const isEpic = issue.issueType?.name === 'Epic';
+
+                  if (isEpic) {
+                    const subs = issue.subIssues?.nodes || [];
+                    const openSubs = subs.filter(s => s.state === 'OPEN').length;
+                    if (openSubs <= 1) {
+                      const match = allCollections.find(c => {
+                        const epic = parseEpicFromCollection(c.fileCollection);
+                        return epic && epic.repo === target.repo && epic.number === target.number;
+                      });
+                      if (match && !epicsToSweep.includes(match)) {
+                        epicsToSweep.push(match);
+                        core.info(`Epic ${target.repo}#${target.number} matched via heuristic (open sub-issues: ${openSubs})`);
+                      }
+                    }
+                  } else {
+                    const parentQ = await github.graphql(`
+                      query($owner: String!, $repo: String!, $number: Int!) {
+                        repository(owner: $owner, name: $repo) {
+                          issue(number: $number) {
+                            parent { number repository { name } issueType { name } }
+                          }
+                        }
+                      }
+                    `, { owner: context.repo.owner, repo: target.repo, number: target.number }).catch(() => null);
+                    const parent = parentQ?.repository?.issue?.parent;
+                    if (parent && parent.issueType?.name === 'Epic') {
+                      const parentEpicQ = await github.graphql(`
+                        query($owner: String!, $repo: String!, $number: Int!) {
+                          repository(owner: $owner, name: $repo) {
+                            issue(number: $number) {
+                              subIssues(first: 50) { totalCount nodes { number state } }
+                            }
+                          }
+                        }
+                      `, { owner: context.repo.owner, repo: parent.repository.name, number: parent.number });
+                      const subs = parentEpicQ?.repository?.issue?.subIssues?.nodes || [];
+                      const otherOpen = subs.filter(s => s.state === 'OPEN' && s.number !== target.number).length;
+                      if (otherOpen === 0) {
+                        const match = allCollections.find(c => {
+                          const epic = parseEpicFromCollection(c.fileCollection);
+                          return epic && epic.repo === parent.repository.name && epic.number === parent.number;
+                        });
+                        if (match && !epicsToSweep.includes(match)) {
+                          epicsToSweep.push(match);
+                          core.info(`Epic ${parent.repository.name}#${parent.number} matched via heuristic (sub-issue ${target.number} closes; ${otherOpen} other open sub-issues)`);
+                        }
+                      }
+                    }
+                  }
+                } catch (err) {
+                  core.warning(`GraphQL lookup failed for ${target.repo}#${target.number}: ${err.message}`);
+                }
+              }
+
+              if (hasLabel) {
+                for (const c of allCollections) {
+                  const epic = parseEpicFromCollection(c.fileCollection);
+                  if (epic && epic.repo === context.repo.repo) {
+                    if (!epicsToSweep.includes(c)) {
+                      epicsToSweep.push(c);
+                      core.info(`Epic ${epic.repo}#${epic.number} matched via epic-last-pr label`);
+                    }
+                  }
+                }
+              }
+            }
+
+            core.setOutput('epics', JSON.stringify(epicsToSweep));
+            core.setOutput('trigger', trigger);
+            core.info(`Trigger: ${trigger}; epics to sweep: ${epicsToSweep.length}`);
+
+  sweep:
+    needs: detect
+    if: needs.detect.outputs.epics != '[]' && needs.detect.outputs.epics != ''
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        epic: ${{ fromJson(needs.detect.outputs.epics) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify protocol files present
+        env:
+          FILE_COLLECTION: ${{ matrix.epic.fileCollection }}
+          SWEEP_PROTOCOL: ${{ matrix.epic.sweepProtocol }}
+          EPIC_SLUG: ${{ matrix.epic.slug }}
+        run: |
+          set -euo pipefail
+          if [ ! -f "$FILE_COLLECTION" ] || [ ! -f "$SWEEP_PROTOCOL" ]; then
+            echo "::error::Epic $EPIC_SLUG: required protocol file missing (sweep-protocol.md or file-collection.md)"
+            echo "::error::See operations/consistency-sweep/README.md §'How to author the per-epic files'"
+            exit 1
+          fi
+          echo "Protocol files present for $EPIC_SLUG"
+          wc -l "$FILE_COLLECTION" "$SWEEP_PROTOCOL"
+
+      - name: Load secrets from 1Password
+        id: op_secrets
+        if: ${{ env.OP_SERVICE_ACCOUNT_TOKEN != '' }}
+        uses: 1password/load-secrets-action@v2
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          ANTHROPIC_API_KEY: op://COO/anthropic-api-key/credential
+        with:
+          export-env: true
+
+      - name: Dispatch consistency-sweep agent
+        id: sweep
+        uses: anthropics/claude-code-action@v1
+        env:
+          EPIC_SLUG: ${{ matrix.epic.slug }}
+          SWEEP_PROTOCOL: ${{ matrix.epic.sweepProtocol }}
+          FILE_COLLECTION: ${{ matrix.epic.fileCollection }}
+          TRIGGER: ${{ needs.detect.outputs.trigger }}
+          PR_NUMBER: ${{ github.event.pull_request.number || 'N/A' }}
+        with:
+          anthropic_api_key: ${{ env.ANTHROPIC_API_KEY || secrets.ANTHROPIC_API_KEY }}
+          claude_args: --model claude-sonnet-4-6 --permission-mode bypassPermissions --agent consistency-sweep
+          show_full_output: true
+          prompt: |
+            You are the consistency-sweep agent.
+
+            Inputs:
+            - Epic slug: ${{ env.EPIC_SLUG }}
+            - Protocol: ${{ env.SWEEP_PROTOCOL }}
+            - File-collection: ${{ env.FILE_COLLECTION }}
+            - Trigger: ${{ env.TRIGGER }}
+            - PR: ${{ env.PR_NUMBER }}
+            - Run date: $(date -u +%Y-%m-%d)
+
+            Read the protocol + file-collection. Scan every `class: current`
+            D-file for the shared-info tokens declared in protocol §2d.
+            Emit the standard markdown schema from your agent definition.
+
+            Skip boot — do not read identity files. Read-only investigation;
+            no file writes, no `gh` writes, no PR comments. Your structured
+            stdout is the deliverable; the workflow handles the substrate-side
+            writes.
+
+      - name: Update per-epic log + post PR comment
+        if: ${{ !cancelled() && steps.sweep.outcome == 'success' }}
+        uses: actions/github-script@v7
+        env:
+          EPIC_SLUG: ${{ matrix.epic.slug }}
+          AGENT_OUTPUT: ${{ steps.sweep.outputs.text || steps.sweep.outputs.output }}
+          TRIGGER: ${{ needs.detect.outputs.trigger }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const slug = process.env.EPIC_SLUG;
+            const output = process.env.AGENT_OUTPUT || '';
+            const trigger = process.env.TRIGGER;
+
+            const totalMatch = output.match(/\*\*Total findings:\s*(\d+)\*\*/);
+            const total = totalMatch ? parseInt(totalMatch[1], 10) : 0;
+            const highMatch = output.match(/(\d+)\s+high/);
+            const highCount = highMatch ? parseInt(highMatch[1], 10) : 0;
+
+            const status = highCount > 0 ? 'NEEDS-REVIEW' : 'PASS';
+            const today = new Date().toISOString().slice(0, 10);
+
+            if (context.eventName === 'pull_request') {
+              const prNum = context.payload.pull_request.number;
+              const marker = `<!-- consistency-sweep/${slug} -->`;
+              const commentBody = `${marker}\n\n` +
+                `### Consistency sweep — ${slug}\n\n` +
+                `**Status:** ${status} · **Total findings:** ${total} · **Trigger:** ${trigger}\n\n` +
+                `<details><summary>Full sweep output (click to expand)</summary>\n\n${output}\n\n</details>\n\n` +
+                `Per-epic log: \`operations/consistency-sweep/log/${slug}.md\` (updated on merge).`;
+
+              const comments = await github.rest.issues.listComments({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: prNum, per_page: 100,
+              });
+              const existing = comments.data.find(c => c.body && c.body.includes(marker));
+              if (existing) {
+                await github.rest.issues.updateComment({
+                  owner: context.repo.owner, repo: context.repo.repo,
+                  comment_id: existing.id, body: commentBody,
+                });
+              } else {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner, repo: context.repo.repo,
+                  issue_number: prNum, body: commentBody,
+                });
+              }
+
+              const headSha = context.payload.pull_request.head.sha;
+              await github.rest.repos.createCommitStatus({
+                owner: context.repo.owner, repo: context.repo.repo,
+                sha: headSha,
+                state: status === 'PASS' ? 'success' : 'failure',
+                context: `consistency-sweep / ${slug}`,
+                description: `${total} findings (${highCount} high)`,
+              });
+            }
+
+            core.info(`Sweep complete for ${slug}: ${status} (${total} findings)`);
+            core.setOutput('status', status);
+            core.setOutput('total', total);
