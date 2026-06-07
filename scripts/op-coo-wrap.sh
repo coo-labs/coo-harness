@@ -90,26 +90,44 @@ PREF_FILE="$PREF_DIR/active"
 mkdir -p "$PREF_DIR" 2>/dev/null || true
 chmod 0700 "$PREF_DIR" 2>/dev/null || true
 
-# Capture both candidate tokens as locals so we can swap freely without
-# losing track of either. If only one is set, we degrade to single-attempt.
+# Capture all candidate tokens as locals so we can swap freely without
+# losing track of any. If a slot is unset we skip it in the rotation;
+# if only one is set, we degrade to single-attempt.
 _token_a="${OP_SERVICE_ACCOUNT_TOKEN:-}"
 _token_b="${OP_SERVICE_ACCOUNT_TOKEN_BACKUP:-}"
+_token_c="${OP_SERVICE_ACCOUNT_TOKEN_BACKUP2:-}"
 
 # Read marker preference. Default to A (the env's OP_SERVICE_ACCOUNT_TOKEN).
 _pref="A"
 if [ -f "$PREF_FILE" ]; then
   _pref="$(cat "$PREF_FILE" 2>/dev/null || echo A)"
-  case "$_pref" in A|B) ;; *) _pref="A" ;; esac
+  case "$_pref" in A|B|C) ;; *) _pref="A" ;; esac
 fi
 
-# Decide first-try and fallback tokens based on preference + availability.
-if [ "$_pref" = "B" ] && [ -n "$_token_b" ]; then
-  _first="$_token_b" ; _first_name="B"
-  _second="$_token_a" ; _second_name="A"
-else
-  _first="$_token_a" ; _first_name="A"
-  _second="$_token_b" ; _second_name="B"
-fi
+# Build the attempt order as a circular rotation starting at the marker.
+# Order A: A B C | order B: B C A | order C: C A B. Unset slots get pruned
+# below so a single configured token still works as a single-attempt path.
+case "$_pref" in
+  A) _order="A B C" ;;
+  B) _order="B C A" ;;
+  C) _order="C A B" ;;
+esac
+
+# Resolve names to tokens, skipping unset slots. Parallel arrays for token
+# value and name; iterated in attempt order.
+_names=()
+_toks=()
+for _n in $_order; do
+  case "$_n" in
+    A) _t="$_token_a" ;;
+    B) _t="$_token_b" ;;
+    C) _t="$_token_c" ;;
+  esac
+  if [ -n "$_t" ]; then
+    _names+=("$_n")
+    _toks+=("$_t")
+  fi
+done
 
 _trace() {
   [ "${COO_OP_WRAP_TRACE:-0}" = "1" ] || return 0
@@ -131,35 +149,49 @@ trap _cleanup EXIT
 _err_tmp="$(mktemp 2>/dev/null || echo "/tmp/op-coo-wrap.$$.err")"
 : > "$_err_tmp"
 
-# First attempt.
-_trace "attempt 1: token=$_first_name argv=$*"
-if [ -n "$_first" ]; then
-  OP_SERVICE_ACCOUNT_TOKEN="$_first" "$REAL_OP" "$@" 2>"$_err_tmp"
-  _rc=$?
-else
-  # No token in slot A and pref says A. Run anyway — op will surface its
-  # own auth error, which is more useful than a synthetic one from us.
+# Iterate through configured tokens. Each attempt:
+#   - rc=0 OR non-rate-limit error → stop (don't keep probing on legitimate failures)
+#   - rate-limit AND another token available → advance to next
+#   - rate-limit AND last token → surface rate-limit error
+# On a stop, if the stopping token differs from the marker preference,
+# update the marker so subsequent invocations skip the doomed-token probe.
+_rc=0
+_stopped_name=""
+_attempt=0
+_n_tokens=${#_toks[@]}
+
+if [ "$_n_tokens" -eq 0 ]; then
+  # No tokens at all — let op surface its own auth error.
+  _trace "attempt 1: no tokens configured; running real op without OP_SERVICE_ACCOUNT_TOKEN"
   "$REAL_OP" "$@" 2>"$_err_tmp"
   _rc=$?
-fi
+else
+  for _i in "${!_toks[@]}"; do
+    _attempt=$((_attempt + 1))
+    _n="${_names[$_i]}"
+    _t="${_toks[$_i]}"
+    [ "$_attempt" -gt 1 ] && : > "$_err_tmp"
+    _trace "attempt $_attempt: token=$_n argv=$*"
+    OP_SERVICE_ACCOUNT_TOKEN="$_t" "$REAL_OP" "$@" 2>"$_err_tmp"
+    _rc=$?
+    if [ "$_rc" -eq 0 ] || ! _is_rate_limit "$(cat "$_err_tmp" 2>/dev/null)"; then
+      _stopped_name="$_n"
+      break
+    fi
+    # Rate-limited: if a next token exists, advance and retry.
+    if [ "$((_i + 1))" -lt "$_n_tokens" ]; then
+      _next_n="${_names[$((_i + 1))]}"
+      _trace "attempt $_attempt rate-limited; advancing $_n -> $_next_n"
+    else
+      _trace "attempt $_attempt rate-limited; no further tokens; marker unchanged ($_pref)"
+    fi
+  done
 
-# Swap-and-retry path: non-zero exit, rate-limit shape, alternate exists
-# and differs from the first.
-if [ "$_rc" -ne 0 ] \
-   && [ -n "$_second" ] \
-   && [ "$_second" != "$_first" ] \
-   && _is_rate_limit "$(cat "$_err_tmp" 2>/dev/null)"; then
-  _trace "attempt 1 rate-limited; swapping $_first_name -> $_second_name"
-  : > "$_err_tmp"
-  OP_SERVICE_ACCOUNT_TOKEN="$_second" "$REAL_OP" "$@" 2>"$_err_tmp"
-  _rc=$?
-  # Update marker iff the retry didn't also rate-limit. If both
-  # are rate-limited, leave the marker untouched.
-  if [ "$_rc" -eq 0 ] || ! _is_rate_limit "$(cat "$_err_tmp" 2>/dev/null)"; then
-    printf '%s' "$_second_name" > "$PREF_FILE" 2>/dev/null || true
-    _trace "attempt 2 success/non-rl; marker -> $_second_name"
-  else
-    _trace "attempt 2 also rate-limited; marker unchanged ($_pref)"
+  # Update marker if we stopped on a token other than the preferred one.
+  # If _stopped_name is empty, every token rate-limited; leave marker untouched.
+  if [ -n "$_stopped_name" ] && [ "$_stopped_name" != "$_pref" ]; then
+    printf '%s' "$_stopped_name" > "$PREF_FILE" 2>/dev/null || true
+    _trace "marker -> $_stopped_name (was $_pref)"
   fi
 fi
 

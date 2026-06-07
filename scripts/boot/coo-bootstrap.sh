@@ -284,47 +284,63 @@ if ! retry 5 op whoami >/dev/null; then
   exit 1
 fi
 
-# ── Rate-limit auto-fallback to OP_SERVICE_ACCOUNT_TOKEN_BACKUP ─────────
-# 1P enforces a per-SA item-read rate limit (1000 read+write per 24h on
-# Personal/Teams). Approaching the ceiling, `op whoami` continues to work
+# ── Rate-limit auto-fallback to OP_SERVICE_ACCOUNT_TOKEN_BACKUP[2] ─────────
+# 1P enforces a per-SA-token rate limit (e.g. 10k read+1k write per hour on
+# Business; 1k+100 on Teams) AND a per-account daily ceiling (50k/24h on
+# Business; 5k on Teams). Approaching either, `op whoami` continues to work
 # while `op read op://COO/...` returns "Too many requests" rc=1 — which
 # fails install_coo_ssh_keys and downstream.
 #
-# When OP_SERVICE_ACCOUNT_TOKEN_BACKUP is set, sentinel-read a small COO
-# vault item. On rate-limit (or any read failure when the primary
-# whoami is fine), swap to BACKUP for the rest of the bootstrap. BACKUP's
-# SA identity must already be in the .op-sa-identity allowlist (multi-line
-# acceptable) — operator authorizes by appending to the file.
+# Operationally observed: when a token's per-token bucket has gone "sticky"
+# (see MEMO-2026-06-07-...), the per-token throttle persists even after
+# tier upgrade lifts the account ceiling. The fix shape is to provision
+# additional fresh SA tokens; their per-token buckets are independent.
+#
+# Up to two fallback tokens supported: OP_SERVICE_ACCOUNT_TOKEN_BACKUP and
+# OP_SERVICE_ACCOUNT_TOKEN_BACKUP2. Each fallback's SA identity must already
+# be in the .op-sa-identity allowlist — the swap path auto-appends on first
+# successful use (operator authorizes by setting the env var in cloud-env).
 COO_BOOTSTRAP_STEP="op_sentinel_read"
-if [ -n "${OP_SERVICE_ACCOUNT_TOKEN_BACKUP:-}" ]; then
-  # Stderr-captured probe. The `|| _sentinel_rc=$?` consumes the
-  # non-zero exit so `set -e` doesn't trip on the command substitution.
-  _sentinel_out=""
-  _sentinel_rc=0
-  _sentinel_out="$(op read 'op://COO/vade-coo-ssh-auth/public key' 2>&1 >/dev/null)" || _sentinel_rc=$?
-  if [ "$_sentinel_rc" -ne 0 ] && printf '%s' "$_sentinel_out" | grep -qiE 'rate.?limit|too many requests'; then
-    log "coo-bootstrap: standard SA token rate-limited on op read; swapping to OP_SERVICE_ACCOUNT_TOKEN_BACKUP"
-    export OP_SERVICE_ACCOUNT_TOKEN="$OP_SERVICE_ACCOUNT_TOKEN_BACKUP"
-    if ! retry 3 op whoami >/dev/null; then
-      log "FATAL: BACKUP SA token failed op whoami after standard rate-limited"
-      log "  See: coo-memory/operations/secrets/README.md §3.6"
-      exit 1
+
+# Helper: try a sentinel probe on the fallback token at $2; on success
+# persist the marker letter $1 and append the SA identity to the allowlist.
+# Returns 0 on a working token, 1 on rate-limit (caller advances), exits
+# FATAL on a non-rate-limit error (token revoked / wrong scopes / etc).
+_try_sa_fallback() {
+  local _marker="$1" _varname="$2"
+  local _tok="${!_varname:-}"
+  [ -n "$_tok" ] || return 1
+  log "coo-bootstrap: swapping OP_SERVICE_ACCOUNT_TOKEN to $_varname"
+  export OP_SERVICE_ACCOUNT_TOKEN="$_tok"
+  local _probe_out="" _probe_rc=0
+  _probe_out="$(op read 'op://COO/vade-coo-ssh-auth/public key' 2>&1 >/dev/null)" || _probe_rc=$?
+  if [ "$_probe_rc" -ne 0 ]; then
+    if printf '%s' "$_probe_out" | grep -qiE 'rate.?limit|too many requests'; then
+      log "coo-bootstrap: $_varname also rate-limited; advancing"
+      return 1
     fi
-    log "coo-bootstrap: BACKUP SA token active"
-    # Persist the swap for the rest of the session. The op-coo-wrap shim
-    # (installed by session-start-sync.sh ensure_op_coo_wrap, runs before
-    # this hook) reads this marker on every `op` invocation to choose the
-    # active token. Without this, every Bash-tool subprocess would re-probe
-    # the rate-limit on its first op-read. Tmpfs, container-ephemeral.
-    _op_pref_dir="${XDG_RUNTIME_DIR:-/tmp}/coo-op-wrap"
-    mkdir -p "$_op_pref_dir" 2>/dev/null || true
-    chmod 0700 "$_op_pref_dir" 2>/dev/null || true
-    printf B > "$_op_pref_dir/active" 2>/dev/null || true
-    # Auto-append BACKUP's identity to the allowlist on first successful
-    # swap. Authorization signal is the operator setting the BACKUP env
-    # var; this avoids a FATAL on the identity-check immediately below
-    # when a fresh container has not yet seen BACKUP. Idempotent.
-    _backup_id="$(op whoami --format=json 2>/dev/null | python3 -c "
+    log "FATAL: $_varname sentinel-read failed with non-rate-limit error"
+    log "  Probe output: $(printf '%s' "$_probe_out" | head -c 200)"
+    log "  See: coo-memory/operations/secrets/README.md §3.6"
+    exit 1
+  fi
+  if ! retry 3 op whoami >/dev/null; then
+    log "FATAL: $_varname failed op whoami after swap"
+    log "  See: coo-memory/operations/secrets/README.md §3.6"
+    exit 1
+  fi
+  log "coo-bootstrap: $_varname active"
+  # Persist marker so subsequent Bash-tool subprocesses skip the doomed
+  # primary on their op-reads. The op-coo-wrap shim consumes this.
+  _op_pref_dir="${XDG_RUNTIME_DIR:-/tmp}/coo-op-wrap"
+  mkdir -p "$_op_pref_dir" 2>/dev/null || true
+  chmod 0700 "$_op_pref_dir" 2>/dev/null || true
+  printf '%s' "$_marker" > "$_op_pref_dir/active" 2>/dev/null || true
+  # Auto-append this SA's identity to the allowlist on first successful
+  # swap. Authorization signal is the operator setting the fallback env
+  # var; this avoids a FATAL on the identity-check immediately below.
+  local _fb_id
+  _fb_id="$(op whoami --format=json 2>/dev/null | python3 -c "
 import json, sys
 try:
     d = json.load(sys.stdin)
@@ -334,15 +350,30 @@ try:
 except Exception:
     pass
 " 2>/dev/null || true)"
-    if [ -n "$_backup_id" ]; then
-      mkdir -p "$(dirname "${HOME}/.vade/.op-sa-identity")"
-      touch "${HOME}/.vade/.op-sa-identity"
-      if ! grep -Fxq "$_backup_id" "${HOME}/.vade/.op-sa-identity" 2>/dev/null; then
-        printf '%s\n' "$_backup_id" >> "${HOME}/.vade/.op-sa-identity"
-        log "coo-bootstrap: appended BACKUP identity '${_backup_id}' to .op-sa-identity allowlist"
+  if [ -n "$_fb_id" ]; then
+    mkdir -p "$(dirname "${HOME}/.vade/.op-sa-identity")"
+    touch "${HOME}/.vade/.op-sa-identity"
+    if ! grep -Fxq "$_fb_id" "${HOME}/.vade/.op-sa-identity" 2>/dev/null; then
+      printf '%s\n' "$_fb_id" >> "${HOME}/.vade/.op-sa-identity"
+      log "coo-bootstrap: appended ${_marker}-token identity '${_fb_id}' to .op-sa-identity allowlist"
+    fi
+  fi
+  return 0
+}
+
+if [ -n "${OP_SERVICE_ACCOUNT_TOKEN_BACKUP:-}" ] || [ -n "${OP_SERVICE_ACCOUNT_TOKEN_BACKUP2:-}" ]; then
+  # Stderr-captured probe. The `|| _sentinel_rc=$?` consumes the
+  # non-zero exit so `set -e` doesn't trip on the command substitution.
+  _sentinel_out=""
+  _sentinel_rc=0
+  _sentinel_out="$(op read 'op://COO/vade-coo-ssh-auth/public key' 2>&1 >/dev/null)" || _sentinel_rc=$?
+  if [ "$_sentinel_rc" -ne 0 ] && printf '%s' "$_sentinel_out" | grep -qiE 'rate.?limit|too many requests'; then
+    log "coo-bootstrap: standard SA token rate-limited on op read"
+    if ! _try_sa_fallback B OP_SERVICE_ACCOUNT_TOKEN_BACKUP; then
+      if ! _try_sa_fallback C OP_SERVICE_ACCOUNT_TOKEN_BACKUP2; then
+        log "WARN: primary and all configured fallback SA tokens rate-limited; downstream op-reads may fail"
       fi
     fi
-    unset _backup_id
   fi
   unset _sentinel_out _sentinel_rc
 fi
