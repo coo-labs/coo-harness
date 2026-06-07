@@ -139,6 +139,131 @@ _is_rate_limit() {
   printf '%s' "${1:-}" | grep -qiE 'rate.?limit|too many requests'
 }
 
+# ── Per-call jsonl event sink (coo-harness#540 / briefing-40 §2) ──
+# Emits one jsonl event per `op` invocation to
+# /dev/shm/coo-op-reads-L2.<session>.jsonl when COO_OP_WRAP_LOG_READS=1.
+# Default-on for sessions; CI fixtures set it to 0 to keep mock-op
+# output deterministic. Failure to write the event never propagates —
+# logging is best-effort, the op call's contract is unchanged.
+#
+# Cap per session at 10K events to bound worst case (~3 MB).
+COO_OP_WRAP_LOG_READS="${COO_OP_WRAP_LOG_READS:-1}"
+_log_max=10000
+_log_path=""
+_session_id=""
+_container_id=""
+_phase=""
+_caller_cmd=""
+_op_sub=""
+_op_path=""
+
+# Minimal JSON escape — subset of common.sh::_json_escape, inlined to
+# avoid sourcing common.sh on the op hot path. Handles the five cases
+# that recur in caller_cmd / stderr_tail.
+_je() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\r'/\\r}"
+  s="${s//$'\t'/\\t}"
+  printf '%s' "$s"
+}
+
+_log_setup() {
+  [ "$COO_OP_WRAP_LOG_READS" = "1" ] || return 0
+  _session_id="${CLAUDE_CODE_SESSION_ID:-${CLAUDE_CODE_REMOTE_SESSION_ID:-unknown}}"
+  _session_id="${_session_id#cse_}"
+  _container_id="${CLAUDE_CODE_CONTAINER_ID:-unknown}"
+  _log_path="/dev/shm/coo-op-reads-L2.${_session_id}.jsonl"
+
+  # Phase classification: bootstrap (pre-marker or ancestry contains
+  # coo-bootstrap.sh), monitor (subscribe-*.sh ancestor), hook (postuse-
+  # or preuse-*), default steady-state.
+  if [ ! -f "$HOME/.vade/.coo-bootstrap-done" ]; then
+    _phase="bootstrap"
+  else
+    _phase="steady-state"
+  fi
+  local _ancestor_cmd="" _wp="$PPID" _hop _new_p _ac
+  for _hop in 1 2 3 4; do
+    [ -r "/proc/$_wp/status" ] || break
+    _new_p="$(awk '/^PPid:/ {print $2}' "/proc/$_wp/status" 2>/dev/null)"
+    [ -z "$_new_p" ] || [ "$_new_p" = "0" ] && break
+    _wp="$_new_p"
+    if [ -r "/proc/$_wp/cmdline" ]; then
+      _ac="$(tr '\0' ' ' < "/proc/$_wp/cmdline" 2>/dev/null)"
+      _ancestor_cmd="$_ancestor_cmd $_ac"
+    fi
+  done
+  case "$_ancestor_cmd" in
+    *coo-bootstrap.sh*)   _phase="bootstrap" ;;
+    *subscribe-*.sh*)     _phase="monitor" ;;
+    *postuse-*|*preuse-*) _phase="hook" ;;
+  esac
+
+  _caller_cmd="$(tr '\0' ' ' < "/proc/$PPID/cmdline" 2>/dev/null | head -c 240)"
+
+  # Extract op subcommand + op:// path (first matching argv positional).
+  # Paths are data, not secrets; ok to log. Values would be secrets and
+  # are never captured here (stdout flows past us unread).
+  local _a
+  for _a in "$@"; do
+    case "$_a" in
+      -*) continue ;;
+      *)
+        if [ -z "$_op_sub" ]; then
+          _op_sub="$_a"
+        elif [ -z "$_op_path" ]; then
+          case "$_a" in op://*) _op_path="$_a" ;; esac
+        fi
+        ;;
+    esac
+  done
+}
+
+# Emit one Layer 2 jsonl event. Arguments: rc, token_slot, latency_ms,
+# attempt_index (1-based), stderr_tail (truncated). No-op when logging
+# disabled, log_path unresolvable, or cap reached.
+_emit_event() {
+  [ "$COO_OP_WRAP_LOG_READS" = "1" ] || return 0
+  [ -n "$_log_path" ] || return 0
+
+  if [ -f "$_log_path" ]; then
+    local _count
+    _count="$(wc -l < "$_log_path" 2>/dev/null || echo 0)"
+    [ "$_count" -ge "$_log_max" ] 2>/dev/null && return 0
+  fi
+
+  local rc="$1" token="$2" latency_ms="$3" attempt="$4" stderr_tail="${5:-}"
+  local ts rate_limited=false
+  ts="$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
+  _is_rate_limit "$stderr_tail" && rate_limited=true
+
+  # Truncate stderr_tail to 240 chars before escaping.
+  stderr_tail="${stderr_tail:0:240}"
+
+  printf '{"ts":"%s","layer":"L2","session_id":"%s","container_id":"%s","phase":"%s","caller_pid":%d,"caller_cmd":"%s","op_subcommand":"%s","op_path":"%s","token_slot":"%s","latency_ms":%d,"rc":%d,"rate_limited":%s,"retry_attempt_index":%d,"stderr_tail":"%s"}\n' \
+    "$ts" \
+    "$(_je "$_session_id")" \
+    "$(_je "$_container_id")" \
+    "$_phase" \
+    "$PPID" \
+    "$(_je "$_caller_cmd")" \
+    "$(_je "$_op_sub")" \
+    "$(_je "$_op_path")" \
+    "$token" \
+    "$latency_ms" \
+    "$rc" \
+    "$rate_limited" \
+    "$((attempt - 1))" \
+    "$(_je "$stderr_tail")" \
+    >> "$_log_path" 2>/dev/null || true
+}
+
+# One-shot setup (resolves session, phase, caller info, op-sub/path).
+_log_setup "$@"
+
 # Buffer stderr so we can inspect for rate-limit while still replaying
 # verbatim. Stdout flows through directly — op's interesting payload is
 # on stdout, and capturing it would risk truncating large reads.
@@ -163,8 +288,11 @@ _n_tokens=${#_toks[@]}
 if [ "$_n_tokens" -eq 0 ]; then
   # No tokens at all — let op surface its own auth error.
   _trace "attempt 1: no tokens configured; running real op without OP_SERVICE_ACCOUNT_TOKEN"
+  _start_ms="$(date -u +%s%3N 2>/dev/null || echo 0)"
   "$REAL_OP" "$@" 2>"$_err_tmp"
   _rc=$?
+  _end_ms="$(date -u +%s%3N 2>/dev/null || echo 0)"
+  _emit_event "$_rc" "?" "$((_end_ms - _start_ms))" 1 "$(head -c 240 "$_err_tmp" 2>/dev/null || true)"
 else
   for _i in "${!_toks[@]}"; do
     _attempt=$((_attempt + 1))
@@ -172,8 +300,11 @@ else
     _t="${_toks[$_i]}"
     [ "$_attempt" -gt 1 ] && : > "$_err_tmp"
     _trace "attempt $_attempt: token=$_n argv=$*"
+    _start_ms="$(date -u +%s%3N 2>/dev/null || echo 0)"
     OP_SERVICE_ACCOUNT_TOKEN="$_t" "$REAL_OP" "$@" 2>"$_err_tmp"
     _rc=$?
+    _end_ms="$(date -u +%s%3N 2>/dev/null || echo 0)"
+    _emit_event "$_rc" "$_n" "$((_end_ms - _start_ms))" "$_attempt" "$(head -c 240 "$_err_tmp" 2>/dev/null || true)"
     if [ "$_rc" -eq 0 ] || ! _is_rate_limit "$(cat "$_err_tmp" 2>/dev/null)"; then
       _stopped_name="$_n"
       break

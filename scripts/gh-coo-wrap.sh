@@ -95,11 +95,38 @@ SESSION_URL=""
 #  - cache miss (TTL expired or absent)  → 1 op-read (~50-200ms), write cache
 #  - op rate-limited + stale cache       → 0 op-read, stale tmpfs read
 #  - op rate-limited + no stale cache    → empty PAT, gh fails through
+# Per-call Layer 1 jsonl event sink (coo-harness#540 / briefing-40 §2).
+# Emits one line per _resolve_pat invocation documenting the decision
+# (env-passthrough, cache-hit, cache-miss-op-read, op-fail-stale-fallback,
+# op-fail-no-fallback) with latency and cache_age_sec. Best-effort; never
+# affects the PAT-resolution outcome. Cap-per-session at 10K events.
+_pat_emit_event() {
+  [ "${COO_GH_WRAP_LOG_PAT:-1}" = "1" ] || return 0
+  local pat_name="$1" decision="$2" start_ms="$3" cache_age="${4:--1}"
+  local session_id="${CLAUDE_CODE_SESSION_ID:-${CLAUDE_CODE_REMOTE_SESSION_ID:-unknown}}"
+  session_id="${session_id#cse_}"
+  local log_path="/dev/shm/coo-pat-resolve-L1.${session_id}.jsonl"
+  if [ -f "$log_path" ]; then
+    local _count
+    _count="$(wc -l < "$log_path" 2>/dev/null || echo 0)"
+    [ "$_count" -ge 10000 ] 2>/dev/null && return 0
+  fi
+  local end_ms ts
+  end_ms="$(date -u +%s%3N 2>/dev/null || echo 0)"
+  ts="$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf '{"ts":"%s","layer":"L1","session_id":"%s","pat_name":"%s","decision":"%s","latency_ms":%d,"cache_age_sec":%d}\n' \
+    "$ts" "$session_id" "$pat_name" "$decision" "$((end_ms - start_ms))" "$cache_age" \
+    >> "$log_path" 2>/dev/null || true
+}
+
 _resolve_pat() {
   local name="$1" op_path=""
+  local _l1_start_ms
+  _l1_start_ms="$(date -u +%s%3N 2>/dev/null || echo 0)"
   case "$name" in
     MCP)
       if [ -n "${GITHUB_MCP_PAT:-}" ]; then
+        _pat_emit_event "MCP" "env-passthrough" "$_l1_start_ms"
         printf '%s' "$GITHUB_MCP_PAT"
         return 0
       fi
@@ -107,6 +134,7 @@ _resolve_pat() {
       ;;
     PUBLIC)
       if [ -n "${GITHUB_PUBLIC_PAT:-}" ]; then
+        _pat_emit_event "PUBLIC" "env-passthrough" "$_l1_start_ms"
         printf '%s' "$GITHUB_PUBLIC_PAT"
         return 0
       fi
@@ -126,12 +154,20 @@ _resolve_pat() {
   local expiry_file="$cache_dir/$name.expiry"
   local ttl=300
   local now; now="$(date +%s 2>/dev/null || echo 0)"
+  # cache_age_sec: file-mtime-based; -1 when cache file absent.
+  local _cache_age=-1
+  if [ -f "$cache_file" ]; then
+    local _mtime
+    _mtime="$(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null || echo 0)"
+    _cache_age=$((now - _mtime))
+  fi
 
   # Cache hit if both files present and not expired.
   if [ -f "$cache_file" ] && [ -f "$expiry_file" ]; then
     local expiry="0"
     expiry="$(cat "$expiry_file" 2>/dev/null || echo 0)"
     if [ "${expiry:-0}" -gt "$now" ] 2>/dev/null; then
+      _pat_emit_event "$name" "cache-hit" "$_l1_start_ms" "$_cache_age"
       cat "$cache_file"
       return 0
     fi
@@ -149,6 +185,7 @@ _resolve_pat() {
       printf '%s' "$val" > "$cache_file" 2>/dev/null || true
       printf '%s' "$((now + ttl))" > "$expiry_file" 2>/dev/null || true
       umask "$umask_save"
+      _pat_emit_event "$name" "cache-miss-op-read" "$_l1_start_ms" 0
       printf '%s' "$val"
       return 0
     fi
@@ -156,7 +193,10 @@ _resolve_pat() {
 
   # Op unavailable or rate-limited: fall back to stale cache if any.
   if [ -f "$cache_file" ]; then
+    _pat_emit_event "$name" "cache-miss-op-failed-stale-fallback" "$_l1_start_ms" "$_cache_age"
     cat "$cache_file"
+  else
+    _pat_emit_event "$name" "cache-miss-no-fallback" "$_l1_start_ms"
   fi
   return 0
 }
