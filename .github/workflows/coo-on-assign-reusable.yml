@@ -1,15 +1,9 @@
 name: COO on issue assign (reusable)
 
 # Reusable workflow: posts a pre-fill claude.ai/code launch URL on an
-# issue when one of two trigger conditions matches:
-#   (a) assignee.login == 'vade-coo' on an issues.assigned event (legacy path)
-#   (b) issue_field.name == 'Readiness' && issue_field_value.option.name == 'Assigned'
-#       on an issues.field_added event (new path)
-# Called from per-repo thin trigger workflows at `.github/workflows/coo-on-assign.yml`.
-#
-# Dual gate exists during the trigger-rewire rollout: coo-harness is canary
-# (field_added), the other 8 consumer repos still fire on assigned. PR4 of
-# the series strips clause (a) once every thin trigger is on field_added.
+# issue when the Readiness field flips to Assigned. Called from per-repo
+# thin trigger workflows at `.github/workflows/coo-on-assign.yml`, which
+# fire on `issues.field_added` and delegate the gate logic here.
 #
 # Canonical home: coo-labs/coo-harness/.github/workflows/coo-on-assign-reusable.yml
 # Centralization design: coo-memory#939 (F7); moved to coo-harness
@@ -26,11 +20,9 @@ name: COO on issue assign (reusable)
 # scope because coo-on-assign-reusable.yml itself reads repos.yaml from
 # there at job time, and the COO needs write access to keep it current.
 #
-# Trigger contract for callers (either path is valid during rollout):
+# Trigger contract for callers:
 #   on: issues
-#     types: [assigned]              # legacy
-#   on: issues
-#     types: [field_added]           # new — gated by Readiness=Assigned
+#     types: [field_added]
 #   permissions:
 #     issues: write
 #     contents: read
@@ -56,16 +48,12 @@ concurrency:
 
 jobs:
   post-launch-link:
-    # Dual gate (rollout window): either an assignment of vade-coo via the
-    # legacy `issues.assigned` path, OR a Readiness=Assigned transition via
-    # the new `issues.field_added` path. Field_added events fire for ANY
-    # issue-level field value being set/updated, so the field+option pair
-    # match is required to filter to the intended trigger. PR4 of the
-    # rewire series strips the assignee clause.
+    # Gate: field_added events fire for ANY issue-level field value being
+    # set/updated, so the field+option pair match is required to filter to
+    # the intended trigger (Readiness flipping to Assigned).
     if: |
-      github.event.assignee.login == 'vade-coo'
-      || (github.event.issue_field.name == 'Readiness'
-          && github.event.issue_field_value.option.name == 'Assigned')
+      github.event.issue_field.name == 'Readiness'
+      && github.event.issue_field_value.option.name == 'Assigned'
     runs-on: ubuntu-latest
     steps:
       - name: Load active repos from canonical registry
@@ -181,7 +169,7 @@ jobs:
               ``,
               `[**Launch COO session →**](${launchUrl})`,
               ``,
-              `The session opens when you click — claude.ai/code needs a signed-in human (you) to spawn the container. Re-trigger by re-setting \`Readiness: Assigned\` (or re-assigning vade-coo) to post a fresh link (e.g. after a session ends or gets stuck).`,
+              `The session opens when you click — claude.ai/code needs a signed-in human (you) to spawn the container. Re-trigger by re-setting \`Readiness: Assigned\` to post a fresh link (e.g. after a session ends or gets stuck).`,
               ``,
               `---`,
               `<sub>posted by \`coo-on-assign\` workflow · design: coo-labs/coo-memory#801 · [operations doc](https://github.com/coo-labs/coo-memory/blob/main/operations/coo-on-assign.md)</sub>`,
