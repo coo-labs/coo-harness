@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Render an interactive HTML timeline from a bootstrap-trace run.
 
-Usage: render-trace-timeline.py [<trace-dir>] [<output-html>]
+Usage: render-trace-timeline.py [<trace-dir>] [<output-html>] [--json]
 Default trace-dir: ~/.vade/traces/$(cat ~/.vade/traces/CURRENT_RUN_ID)
-Default output:    /tmp/trace-timeline.html
+Default output:    /tmp/trace-timeline.html (or /tmp/trace-data.json with --json)
+
+The ``--json`` flag emits the parsed data blob (the same object the HTML
+renderer embeds inline) and skips HTML emission. Used by
+``upload-trace-bundle.py`` to ship traces to the Console R2 prefix.
 """
 import datetime
 import json
@@ -21,8 +25,12 @@ def find_default_trace_dir():
     raise SystemExit("no trace dir given and CURRENT_RUN_ID not found")
 
 
-TRACE_DIR = sys.argv[1] if len(sys.argv) > 1 else find_default_trace_dir()
-OUTPUT = sys.argv[2] if len(sys.argv) > 2 else "/tmp/trace-timeline.html"
+_ARGS = [a for a in sys.argv[1:] if a != "--json"]
+JSON_MODE = "--json" in sys.argv
+TRACE_DIR = _ARGS[0] if len(_ARGS) > 0 else find_default_trace_dir()
+OUTPUT = _ARGS[1] if len(_ARGS) > 1 else (
+    "/tmp/trace-data.json" if JSON_MODE else "/tmp/trace-timeline.html"
+)
 
 meta_path = os.path.join(TRACE_DIR, "meta.json")
 meta = json.load(open(meta_path)) if os.path.exists(meta_path) else {}
@@ -347,6 +355,15 @@ print(
     f"duration={data['duration_ms']:.0f}ms",
     file=sys.stderr,
 )
+
+if JSON_MODE:
+    if OUTPUT == "-":
+        json.dump(data, sys.stdout)
+    else:
+        with open(OUTPUT, "w") as f:
+            json.dump(data, f)
+        print(f"Wrote {OUTPUT}", file=sys.stderr)
+    sys.exit(0)
 
 run_id = escape(meta.get("run_id", "?"))
 started_at = escape(meta.get("started_at", "?"))

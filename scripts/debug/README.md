@@ -142,6 +142,27 @@ first positional argument; second positional is the HTML output path.
 Also surfaced as the `trace-timeline` skill — the agent will pick this
 up when you ask it to "visualize" or "show" a trace.
 
+### Upload to the Console viewer (preferred)
+
+```bash
+python3 /home/user/coo-harness/scripts/debug/upload-trace-bundle.py
+# → POSTs the parsed data blob to console.vade-app.dev/trace/data
+#   and prints the viewer URL: https://console.vade-app.dev/trace/?run-id=<id>
+```
+
+The uploader invokes `render-trace-timeline.py --json` to parse the
+trace, then POSTs the data blob to the Console Worker, which writes it
+to R2 at `vade-agent-transcripts/console-traces/<run-id>/data.json`
+([coo-labs/coo-memory#832](https://github.com/coo-labs/coo-memory/issues/832)).
+The Console's `/trace/` React route fetches the same data blob and
+renders the timeline live, replacing the static-HTML flow above.
+
+Auth: bearer token from `op://COO/console-token-2026-05/credential`
+(or set `CONSOLE_TOKEN` in env). The R2 prefix is auth-gated on both
+read and write. Pass `--dry-run` to parse + validate without uploading.
+`--data-json <path>` skips parsing and uploads a pre-rendered blob —
+useful for re-uploading a saved bundle.
+
 ## How to stop the trace
 
 Three options, descending order of operational simplicity:
