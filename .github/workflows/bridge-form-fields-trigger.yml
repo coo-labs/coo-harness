@@ -7,7 +7,7 @@ name: Bridge issue-form widgets to native fields (trigger)
 # This file is hand-mirrored across coo-memory / coo-harness /
 # vade-canvas / coo-logs. Edit canonical in coo-memory and
 # port to siblings (workflow-sync convention; see
-# coo/operations/issue-pr-hygiene.md).
+# operations/issue-pr-hygiene.md).
 #
 # Bridge design + script source: coo-labs/coo-harness#TBD.
 # Stage 2 design: coo-labs/coo-memory#811.
