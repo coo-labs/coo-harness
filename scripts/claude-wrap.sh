@@ -1,54 +1,47 @@
 #!/usr/bin/env bash
-# claude-thinking-display-wrap.sh — PATH shim for cloud Claude Code launches.
-#
-# Two responsibilities, both gated to agent-shaped invocations (subcommands and
-# probes pass through untouched):
-#
-#   1. Inject `--thinking-display summarized` so Opus 4.7+ Web/SDK/headless
-#      sessions still render thinking summaries (the binary's API default for
-#      `thinking.display` flipped to `"omitted"`). MEMO-2026-06-07-4bat.
-#
-#         if (z.thinkingDisplay === "summarized" || z.thinkingDisplay === "omitted")
-#           pz.display = z.thinkingDisplay;       // CLI flag — wins on every surface
-#         else if (!p6() && hK8())
-#           pz.display = "summarized";            // settings flag — gated to interactive
-#
-#      The CLI-flag branch bypasses the `p6()` non-interactive short-circuit.
-#
-#   2. Append `Workflow` to the launcher's `--tools` / `--allowed-tools` /
-#      `--allowedTools` values so the dynamic-workflows feature is projected to
-#      the model. The cloud env-manager's launcher allowlist omits `Workflow`
-#      even when the in-process gate (policy `L7("allow_workflows")` + GrowthBook
-#      `tengu_workflows_enabled` + `settings.enableWorkflows`) is satisfied; this
-#      injection adds it back at the launcher arg layer.
+# claude-wrap.sh — PATH shim for cloud Claude Code launches. Intercepts
+# agent-shaped invocations and injects CLI flags before exec'ing the real
+# `claude` binary. General-purpose: each injection is its own block, gated
+# independently. Subcommands and probes pass through untouched.
 #
 # Installation: `cloud-setup.sh` copies this file to `/root/.local/bin/claude`,
 # which precedes `/opt/node22/bin/claude` in env-manager's PATH.
 #
+# Common preconditions (every injection block requires both):
+#   - First arg is not a subcommand or probe (mcp, config, doctor, --version, …).
+#   - Args carry an agent-invocation marker (--sdk-url, -p/--print,
+#     --output-format=, --thinking adaptive|enabled, --resume=, --model …).
+#
+# Injection blocks:
+#
+#   1. `--thinking-display summarized` — MEMO-2026-06-07-4bat.
+#      So Opus 4.7+ Web/SDK/headless sessions still render thinking summaries
+#      (the binary's API default for `thinking.display` flipped to `"omitted"`).
+#         if (z.thinkingDisplay === "summarized" || z.thinkingDisplay === "omitted")
+#           pz.display = z.thinkingDisplay;       // CLI flag — wins on every surface
+#         else if (!p6() && hK8())
+#           pz.display = "summarized";            // settings flag — gated to interactive
+#      The CLI-flag branch bypasses the `p6()` non-interactive short-circuit.
+#      Extra conditions: CC_THINKING_DISPLAY != "omitted"; --thinking-display
+#      not already in args; --thinking disabled not in args.
+#
+#   2. `Workflow` appended to `--tools` / `--allowed-tools` / `--allowedTools`
+#      values — MEMO-2026-06-07-fkef.
+#      The cloud env-manager's launcher allowlist omits `Workflow` even when
+#      the in-process gate (policy `L7("allow_workflows")` + GrowthBook
+#      `tengu_workflows_enabled` + `settings.enableWorkflows`) is satisfied;
+#      this adds it back at the launcher arg layer. Extra conditions:
+#      CC_INJECT_WORKFLOW != "0"; a target arg is present whose value is
+#      neither empty nor literal "default", and does not already include "Workflow".
+#
 # Override knobs:
-#   CC_THINKING_DISPLAY=omitted       — disable thinking-display injection
-#   CC_INJECT_WORKFLOW=0              — disable Workflow tool injection
-#   CLAUDE_THINKING_WRAP_REAL_BINARY  — exec target (default /opt/node22/bin/claude)
-#
-# Inject preconditions (both injections require these):
-#   1. First arg is not a subcommand or probe (mcp, config, doctor, --version, …).
-#   2. Args carry an agent-invocation marker (--sdk-url, -p/--print, --output-format=,
-#      --thinking adaptive|enabled, --resume=, --model …).
-#
-# Thinking-display additional conditions:
-#   3. CC_THINKING_DISPLAY != "omitted".
-#   4. --thinking-display not already in args.
-#   5. --thinking disabled not in args.
-#
-# Workflow injection additional conditions:
-#   3. CC_INJECT_WORKFLOW != "0".
-#   4. A --tools / --allowed-tools / --allowedTools arg is present whose value
-#      is neither empty nor literal "default", and does not already include
-#      "Workflow".
+#   CC_THINKING_DISPLAY=omitted   — disable thinking-display injection
+#   CC_INJECT_WORKFLOW=0          — disable Workflow tool injection
+#   CLAUDE_WRAP_REAL_BINARY       — exec target (default /opt/node22/bin/claude)
 
 set -euo pipefail
 
-REAL_BINARY="${CLAUDE_THINKING_WRAP_REAL_BINARY:-/opt/node22/bin/claude}"
+REAL_BINARY="${CLAUDE_WRAP_REAL_BINARY:-/opt/node22/bin/claude}"
 DISPLAY_VALUE="${CC_THINKING_DISPLAY:-summarized}"
 INJECT_WORKFLOW="${CC_INJECT_WORKFLOW:-1}"
 

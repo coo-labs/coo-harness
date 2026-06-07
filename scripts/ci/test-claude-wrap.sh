@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# test-claude-thinking-display-wrap: smoke-test
-# scripts/claude-thinking-display-wrap.sh against a mock `claude` binary that
-# echoes its received args. For each fixture, assert whether
-# `--thinking-display summarized` is or is not present in the exec'd args.
+# test-claude-wrap: smoke-test scripts/claude-wrap.sh against a mock `claude`
+# binary that echoes its received args. For each fixture, assert whether the
+# expected injection (--thinking-display summarized, Workflow tool) is or is
+# not present in the exec'd args.
 #
-# Run: bash scripts/ci/test-claude-thinking-display-wrap.sh
+# Run: bash scripts/ci/test-claude-wrap.sh
 # Exit: 0 if all assertions pass, 1 otherwise.
 
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WRAP="$SCRIPT_DIR/../claude-thinking-display-wrap.sh"
+WRAP="$SCRIPT_DIR/../claude-wrap.sh"
 
 [ -x "$WRAP" ] || { echo "FAIL: wrapper not executable at $WRAP"; exit 1; }
 
@@ -23,7 +23,7 @@ printf '%s\n' "$@"
 EOF
 chmod +x "$TMPDIR/fake-claude"
 
-export CLAUDE_THINKING_WRAP_REAL_BINARY="$TMPDIR/fake-claude"
+export CLAUDE_WRAP_REAL_BINARY="$TMPDIR/fake-claude"
 
 PASS=0
 FAIL=0

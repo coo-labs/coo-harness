@@ -205,19 +205,18 @@ else
   log "Warning: ensure_pyyaml failed; if the base image lacks python3-yaml, coo-bootstrap will fail at fetch_coo_secrets."
 fi
 
-# Install the claude-thinking-display wrapper at /root/.local/bin/claude so
-# Anthropic's env-manager resolves through the wrapper (which appends
-# --thinking-display summarized on agent invocations) before reaching the
-# real binary at /opt/node22/bin/claude. Restores thinking summaries on
-# Opus 4.7+ Web/SDK/headless sessions; supersedes MEMO-2026-05-25-ikqp's
-# model-family routing rule once verified live. See
-# scripts/claude-thinking-display-wrap.sh for detection conditions.
-# Best-effort: skipped under VADE_CLAUDE_WRAP_DISABLE=1 or when the real
-# binary isn't where we expect, leaving the session unchanged.
-if install_claude_thinking_display_wrap "$RUNTIME_DIR/scripts/claude-thinking-display-wrap.sh"; then
-  build_log_record OK "cloud-setup: claude-thinking-display-wrap installed at build time"
+# Install the general claude-wrap PATH shim at /root/.local/bin/claude so
+# Anthropic's env-manager resolves through the wrapper before reaching the
+# real binary at /opt/node22/bin/claude. The wrapper carries per-block CLI-arg
+# injections — currently --thinking-display summarized (MEMO-2026-06-07-4bat,
+# supersedes MEMO-2026-05-25-ikqp) and Workflow tool projection
+# (MEMO-2026-06-07-fkef). See scripts/claude-wrap.sh for per-block conditions
+# and override knobs. Best-effort: skipped under VADE_CLAUDE_WRAP_DISABLE=1 or
+# when the real binary isn't where we expect, leaving the session unchanged.
+if install_claude_wrap "$RUNTIME_DIR/scripts/claude-wrap.sh"; then
+  build_log_record OK "cloud-setup: claude-wrap installed at build time"
 else
-  build_log_record WARN "cloud-setup: claude-thinking-display-wrap install failed at build time; sessions will not get thinking summaries on Opus 4.7+"
+  build_log_record WARN "cloud-setup: claude-wrap install failed at build time; sessions will not get claude-wrap injections (thinking summaries on Opus 4.7+, Workflow tool projection)"
 fi
 
 # Pre-fetch the 1Password MCP server (@takescake/1password-mcp) so
