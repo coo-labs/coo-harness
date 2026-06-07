@@ -330,6 +330,92 @@ fi
 assert_eq "skip B: rc=0" "$rc" "0"
 assert_eq "skip B: marker=C" "$(cat "$XDG_RUNTIME_DIR/coo-op-wrap/active" 2>/dev/null)" "C"
 
+# ---- TEST 15: COO_OP_WRAP_LOG_READS=1 → L2 jsonl event written ----
+# Verify the instrumentation shipped by coo-harness#540 / briefing-40:
+# every op invocation emits one jsonl event per attempt to
+# /dev/shm/coo-op-reads-L2.<session>.jsonl with the documented schema.
+# Use explicit `env` so the prefix scopes to the wrapper subshell rather
+# than the local `rc=0` command (which would not propagate).
+fresh_env
+unset MOCK_OP_FAIL_A MOCK_OP_FAIL_B MOCK_OP_FAIL_C
+LOG_SESSION="ci-test-540-$$"
+LOG_PATH="/dev/shm/coo-op-reads-L2.${LOG_SESSION}.jsonl"
+rm -f "$LOG_PATH"
+rc=0
+out="$(env -u OP_SERVICE_ACCOUNT_TOKEN_BACKUP2 \
+           CLAUDE_CODE_SESSION_ID="$LOG_SESSION" \
+           COO_OP_WRAP_LOG_READS=1 \
+           OP_SERVICE_ACCOUNT_TOKEN="$MOCK_OP_TOKEN_A_VALUE" \
+           OP_SERVICE_ACCOUNT_TOKEN_BACKUP="$MOCK_OP_TOKEN_B_VALUE" \
+           "$WRAPPER" read 'op://COO/test/path' 2>&1)" || rc=$?
+assert_eq "instrumentation: rc=0" "$rc" "0"
+if [ ! -f "$LOG_PATH" ]; then
+  FAIL=$((FAIL+1)); FAILURES+=("instrumentation: log file not written at $LOG_PATH")
+  printf '  FAIL  instrumentation: log file not written at %s\n' "$LOG_PATH"
+else
+  PASS=$((PASS+1)); printf '  PASS  instrumentation: log file written\n'
+  event_count="$(wc -l < "$LOG_PATH")"
+  assert_eq "instrumentation: exactly 1 event for 1 attempt" "$event_count" "1"
+  event_line="$(head -1 "$LOG_PATH")"
+  assert_contains "instrumentation: layer=L2" "$event_line" '"layer":"L2"'
+  assert_contains "instrumentation: session_id" "$event_line" "\"session_id\":\"$LOG_SESSION\""
+  assert_contains "instrumentation: op_path captured" "$event_line" '"op_path":"op://COO/test/path"'
+  assert_contains "instrumentation: token_slot=A" "$event_line" '"token_slot":"A"'
+  assert_contains "instrumentation: rc=0" "$event_line" '"rc":0'
+  assert_contains "instrumentation: rate_limited=false" "$event_line" '"rate_limited":false'
+  assert_contains "instrumentation: retry_attempt_index=0" "$event_line" '"retry_attempt_index":0'
+fi
+rm -f "$LOG_PATH"
+
+# ---- TEST 16: COO_OP_WRAP_LOG_READS=0 → no jsonl event ----
+fresh_env
+LOG_PATH="/dev/shm/coo-op-reads-L2.${LOG_SESSION}.jsonl"
+rm -f "$LOG_PATH"
+rc=0
+out="$(env -u OP_SERVICE_ACCOUNT_TOKEN_BACKUP2 \
+           CLAUDE_CODE_SESSION_ID="$LOG_SESSION" \
+           COO_OP_WRAP_LOG_READS=0 \
+           OP_SERVICE_ACCOUNT_TOKEN="$MOCK_OP_TOKEN_A_VALUE" \
+           OP_SERVICE_ACCOUNT_TOKEN_BACKUP="$MOCK_OP_TOKEN_B_VALUE" \
+           "$WRAPPER" read 'op://COO/test/path' 2>&1)" || rc=$?
+assert_eq "instrumentation off: rc=0" "$rc" "0"
+if [ -f "$LOG_PATH" ]; then
+  FAIL=$((FAIL+1)); FAILURES+=("instrumentation off: log file written despite COO_OP_WRAP_LOG_READS=0")
+  printf '  FAIL  instrumentation off: log file written despite COO_OP_WRAP_LOG_READS=0\n'
+else
+  PASS=$((PASS+1)); printf '  PASS  instrumentation off: log file suppressed\n'
+fi
+
+# ---- TEST 17: rate-limit retry → one event per attempt, retry_attempt_index counts ----
+fresh_env
+LOG_PATH="/dev/shm/coo-op-reads-L2.${LOG_SESSION}.jsonl"
+rm -f "$LOG_PATH"
+export MOCK_OP_FAIL_A="rate_limit"; unset MOCK_OP_FAIL_B MOCK_OP_FAIL_C
+rc=0
+out="$(env -u OP_SERVICE_ACCOUNT_TOKEN_BACKUP2 \
+           CLAUDE_CODE_SESSION_ID="$LOG_SESSION" \
+           COO_OP_WRAP_LOG_READS=1 \
+           OP_SERVICE_ACCOUNT_TOKEN="$MOCK_OP_TOKEN_A_VALUE" \
+           OP_SERVICE_ACCOUNT_TOKEN_BACKUP="$MOCK_OP_TOKEN_B_VALUE" \
+           "$WRAPPER" read 'op://COO/test/path' 2>&1)" || rc=$?
+assert_eq "rate-limit retry: rc=0" "$rc" "0"
+if [ ! -f "$LOG_PATH" ]; then
+  FAIL=$((FAIL+1)); FAILURES+=("rate-limit retry: log file not written")
+  printf '  FAIL  rate-limit retry: log file not written\n'
+else
+  event_count="$(wc -l < "$LOG_PATH")"
+  assert_eq "rate-limit retry: 2 events (1 fail + 1 success)" "$event_count" "2"
+  attempt_0="$(sed -n '1p' "$LOG_PATH")"
+  attempt_1="$(sed -n '2p' "$LOG_PATH")"
+  assert_contains "rate-limit retry: attempt 0 = A" "$attempt_0" '"token_slot":"A"'
+  assert_contains "rate-limit retry: attempt 0 rate-limited" "$attempt_0" '"rate_limited":true'
+  assert_contains "rate-limit retry: attempt 0 retry_attempt_index=0" "$attempt_0" '"retry_attempt_index":0'
+  assert_contains "rate-limit retry: attempt 1 = B" "$attempt_1" '"token_slot":"B"'
+  assert_contains "rate-limit retry: attempt 1 success" "$attempt_1" '"rc":0'
+  assert_contains "rate-limit retry: attempt 1 retry_attempt_index=1" "$attempt_1" '"retry_attempt_index":1'
+fi
+rm -f "$LOG_PATH"
+
 # ---- Summary ----
 echo
 echo "----------------------------------------"
