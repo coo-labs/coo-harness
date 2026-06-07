@@ -6,9 +6,9 @@ name: Sync issue templates
 # coo-labs/.github/repos.yaml (minus coo-harness, the canonical).
 #
 # Centralization: coo-memory#938 (F8). Mechanism rationale (sync-action
-# vs symlink vs build-time): coo-memory/coo/audits/2026-05-24_org-infrastructure-audit/
+# vs symlink vs build-time): coo-memory/audits/2026-05-24_org-infrastructure-audit/
 # f7-f8-centralization-design.md §"Issue templates". Operations doc:
-# coo-memory/coo/operations/template-centralization.md.
+# coo-memory/operations/template-centralization.md.
 #
 # Canonical-host pivot (vcm → vrt): vrt aligns with the F7 pattern — harness
 # owns operational infrastructure; ops doc + case-law live in vcm. Templates

@@ -8,8 +8,8 @@ name: COO on issue assign (reusable)
 # Centralization design: coo-memory#939 (F7); moved to coo-harness
 # (public) per #939 comment because Public→Private workflow_call resolution
 # fails despite access_level=organization on the target.
-# Operations doc: coo-labs/coo-memory:coo/operations/workflow-centralization.md
-# Workflow rationale: coo-labs/coo-memory:coo/operations/coo-on-assign.md
+# Operations doc: coo-labs/coo-memory:operations/workflow-centralization.md
+# Workflow rationale: coo-labs/coo-memory:operations/coo-on-assign.md
 #
 # COO_SCOPE_REPOS source: fetched at job time from the canonical registry
 # at coo-labs/.github/repos.yaml (status == "active" filter; all tiers
@@ -169,7 +169,7 @@ jobs:
               `The session opens when you click — claude.ai/code needs a signed-in human (you) to spawn the container. Re-assign me to post a fresh link (e.g. after a session ends or gets stuck).`,
               ``,
               `---`,
-              `<sub>posted by \`coo-on-assign\` workflow · design: coo-labs/coo-memory#801 · [operations doc](https://github.com/coo-labs/coo-memory/blob/main/coo/operations/coo-on-assign.md)</sub>`,
+              `<sub>posted by \`coo-on-assign\` workflow · design: coo-labs/coo-memory#801 · [operations doc](https://github.com/coo-labs/coo-memory/blob/main/operations/coo-on-assign.md)</sub>`,
             ].join('\n');
 
             await github.rest.issues.createComment({
