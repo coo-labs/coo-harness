@@ -331,9 +331,25 @@ assert_contains "gh repo create --template foreign/X coo-labs/Y: keeps MCP_PAT (
 out="$("$WRAPPER" repo create --template coo-labs/foo venpopov/new --public)"
 assert_contains "gh repo create --template coo-labs/X venpopov/Y: swaps to PUBLIC_PAT (target wins)" "$out" "GH_TOKEN=PUBLIC_PAT_TESTING"
 
-# --- GITHUB_PUBLIC_PAT unset: no override even for non-coo-labs ---
-
-out="$(env -u GITHUB_PUBLIC_PAT GITHUB_MCP_PAT="$GITHUB_MCP_PAT" GH_TOKEN="$GH_TOKEN" CLAUDE_CODE_REMOTE_SESSION_ID="$CLAUDE_CODE_REMOTE_SESSION_ID" COO_GH_REAL="$WORK/gh-real" "$WRAPPER" repo fork venpopov/foo)"
+# --- GITHUB_PUBLIC_PAT unset AND no fallback source: no swap ---
+#
+# Full env-isolation (`env -i`) is load-bearing here: we are asserting
+# that the wrapper finds NO source for the PUBLIC PAT, so it must not
+# observe the host's $OP_SERVICE_ACCOUNT_TOKEN (op-read fallback would
+# fire), $XDG_RUNTIME_DIR (a pre-populated tmpfs cache from a real-gh
+# call earlier in the session would serve a real PAT), or a $PATH that
+# includes `op`. The earlier `env -u GITHUB_PUBLIC_PAT …` form leaked
+# all three and the test asserted against a real `vade-coo` ghp_* PAT
+# materialized by the wrapper — coo-memory#1252.
+out="$(env -i \
+       PATH="/usr/bin:/bin" \
+       HOME="$HOME" \
+       XDG_RUNTIME_DIR="$WORK/iso-runtime" \
+       GITHUB_MCP_PAT="$GITHUB_MCP_PAT" \
+       GH_TOKEN="$GH_TOKEN" \
+       CLAUDE_CODE_REMOTE_SESSION_ID="$CLAUDE_CODE_REMOTE_SESSION_ID" \
+       COO_GH_REAL="$WORK/gh-real" \
+       "$WRAPPER" repo fork venpopov/foo)"
 assert_contains "GITHUB_PUBLIC_PAT unset: no swap, keeps MCP_PAT" "$out" "GH_TOKEN=MCP_PAT_TESTING"
 
 # --- uncovered subcommands: no swap ---
