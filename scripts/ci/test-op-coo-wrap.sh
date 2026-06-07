@@ -23,17 +23,18 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 # Mock op-real: behaves per env switches.
-#   MOCK_OP_TOKEN_A_VALUE / _B_VALUE — the strings the test will set
-#     OP_SERVICE_ACCOUNT_TOKEN / OP_SERVICE_ACCOUNT_TOKEN_BACKUP to.
-#     Mock reports which bucket the actual OP_SERVICE_ACCOUNT_TOKEN
-#     matches ("A", "B", or "OTHER") by comparing values.
-#   MOCK_OP_FAIL_A / _B — set to "rate_limit" / "other_error" / "ok".
+#   MOCK_OP_TOKEN_A_VALUE / _B_VALUE / _C_VALUE — the strings the test will set
+#     OP_SERVICE_ACCOUNT_TOKEN / OP_SERVICE_ACCOUNT_TOKEN_BACKUP /
+#     OP_SERVICE_ACCOUNT_TOKEN_BACKUP2 to. Mock reports which bucket the actual
+#     OP_SERVICE_ACCOUNT_TOKEN matches ("A", "B", "C", or "OTHER") by value.
+#   MOCK_OP_FAIL_A / _B / _C — set to "rate_limit" / "other_error" / "ok".
 #     Controls exit code + stderr based on which bucket was passed.
 cat > "$WORK/op-real" <<'EOF'
 #!/usr/bin/env bash
 got="${OP_SERVICE_ACCOUNT_TOKEN:-<unset>}"
 if   [ "$got" = "${MOCK_OP_TOKEN_A_VALUE:-__no_a__}" ]; then bucket="A"
 elif [ "$got" = "${MOCK_OP_TOKEN_B_VALUE:-__no_b__}" ]; then bucket="B"
+elif [ "$got" = "${MOCK_OP_TOKEN_C_VALUE:-__no_c__}" ]; then bucket="C"
 else bucket="OTHER"
 fi
 printf 'TOKEN_BUCKET=%s\n' "$bucket"
@@ -43,6 +44,7 @@ printf 'ARGV=%s\n' "$*"
 case "$bucket" in
   A) fail_mode="${MOCK_OP_FAIL_A:-ok}" ;;
   B) fail_mode="${MOCK_OP_FAIL_B:-ok}" ;;
+  C) fail_mode="${MOCK_OP_FAIL_C:-ok}" ;;
   *) fail_mode="${MOCK_OP_FAIL_OTHER:-ok}" ;;
 esac
 
@@ -114,7 +116,8 @@ export MOCK_OP_TOKEN_B_VALUE="backup_token_BBBBBB"
 # this is a no-op; on a clean runner (CI), the omission would make every
 # reassignment a non-exported local → wrapper sees the var as unset →
 # mock op-real reports bucket=OTHER and every assertion fails.
-export OP_SERVICE_ACCOUNT_TOKEN="" OP_SERVICE_ACCOUNT_TOKEN_BACKUP=""
+export OP_SERVICE_ACCOUNT_TOKEN="" OP_SERVICE_ACCOUNT_TOKEN_BACKUP="" OP_SERVICE_ACCOUNT_TOKEN_BACKUP2=""
+export MOCK_OP_TOKEN_C_VALUE="backup2_token_CCCCCC"
 
 # ---- TEST 1: primary OK → uses A, no marker write ----
 fresh_env
@@ -236,6 +239,96 @@ if printf '%s' "$out_stderr" | grep -q "Too many requests"; then
 else
   PASS=$((PASS+1)); printf '  PASS  RL swap success: primary RL stderr suppressed\n'
 fi
+
+# ---- TEST 10: A+B rate-limited, C ok → cascades to C, marker=C ----
+# Re-export the SA-token vars in case prior tests unset OP_SERVICE_ACCOUNT_TOKEN_BACKUP
+# (TEST 7 does so); a plain prefix-assignment after unset doesn't restore the export
+# attribute, and the subshell wouldn't see B as a result.
+fresh_env
+export MOCK_OP_FAIL_A="rate_limit"; export MOCK_OP_FAIL_B="rate_limit"; unset MOCK_OP_FAIL_C
+export OP_SERVICE_ACCOUNT_TOKEN OP_SERVICE_ACCOUNT_TOKEN_BACKUP OP_SERVICE_ACCOUNT_TOKEN_BACKUP2
+OP_SERVICE_ACCOUNT_TOKEN="$MOCK_OP_TOKEN_A_VALUE" \
+OP_SERVICE_ACCOUNT_TOKEN_BACKUP="$MOCK_OP_TOKEN_B_VALUE" \
+OP_SERVICE_ACCOUNT_TOKEN_BACKUP2="$MOCK_OP_TOKEN_C_VALUE" \
+rc=0; out="$("$WRAPPER" read 'op://fake/x' 2>&1)" || rc=$?
+assert_contains "A+B RL, C ok: attempted A" "$out" "TOKEN_BUCKET=A"
+assert_contains "A+B RL, C ok: attempted B" "$out" "TOKEN_BUCKET=B"
+assert_contains "A+B RL, C ok: cascaded to C" "$out" "TOKEN_BUCKET=C"
+assert_eq "A+B RL, C ok: rc=0" "$rc" "0"
+assert_eq "A+B RL, C ok: marker=C" "$(cat "$XDG_RUNTIME_DIR/coo-op-wrap/active" 2>/dev/null)" "C"
+
+# ---- TEST 11: all three rate-limited → all attempted, rc=1, marker unchanged ----
+fresh_env
+export MOCK_OP_FAIL_A="rate_limit"; export MOCK_OP_FAIL_B="rate_limit"; export MOCK_OP_FAIL_C="rate_limit"
+export OP_SERVICE_ACCOUNT_TOKEN OP_SERVICE_ACCOUNT_TOKEN_BACKUP OP_SERVICE_ACCOUNT_TOKEN_BACKUP2
+mkdir -p "$XDG_RUNTIME_DIR/coo-op-wrap"
+printf A > "$XDG_RUNTIME_DIR/coo-op-wrap/active"
+OP_SERVICE_ACCOUNT_TOKEN="$MOCK_OP_TOKEN_A_VALUE" \
+OP_SERVICE_ACCOUNT_TOKEN_BACKUP="$MOCK_OP_TOKEN_B_VALUE" \
+OP_SERVICE_ACCOUNT_TOKEN_BACKUP2="$MOCK_OP_TOKEN_C_VALUE" \
+rc=0; out="$("$WRAPPER" read 'op://fake/x' 2>&1)" || rc=$?
+assert_contains "all RL: attempted A" "$out" "TOKEN_BUCKET=A"
+assert_contains "all RL: attempted B" "$out" "TOKEN_BUCKET=B"
+assert_contains "all RL: attempted C" "$out" "TOKEN_BUCKET=C"
+assert_eq "all RL: rc=1" "$rc" "1"
+assert_eq "all RL: marker unchanged=A" "$(cat "$XDG_RUNTIME_DIR/coo-op-wrap/active" 2>/dev/null)" "A"
+
+# ---- TEST 12: marker=C + C ok → uses C straight away, no A/B probe ----
+fresh_env
+unset MOCK_OP_FAIL_A MOCK_OP_FAIL_B MOCK_OP_FAIL_C
+mkdir -p "$XDG_RUNTIME_DIR/coo-op-wrap"
+printf C > "$XDG_RUNTIME_DIR/coo-op-wrap/active"
+OP_SERVICE_ACCOUNT_TOKEN="$MOCK_OP_TOKEN_A_VALUE" \
+OP_SERVICE_ACCOUNT_TOKEN_BACKUP="$MOCK_OP_TOKEN_B_VALUE" \
+OP_SERVICE_ACCOUNT_TOKEN_BACKUP2="$MOCK_OP_TOKEN_C_VALUE" \
+rc=0; out="$("$WRAPPER" read 'op://fake/x' 2>&1)" || rc=$?
+assert_contains "marker=C: uses bucket=C" "$out" "TOKEN_BUCKET=C"
+if printf '%s' "$out" | grep -qE "TOKEN_BUCKET=(A|B)"; then
+  FAIL=$((FAIL+1)); FAILURES+=("marker=C: should not probe A or B")
+  printf '  FAIL  marker=C: should not probe A or B\n'
+else
+  PASS=$((PASS+1)); printf '  PASS  marker=C: no A/B probe\n'
+fi
+assert_eq "marker=C: rc=0" "$rc" "0"
+
+# ---- TEST 13: marker=C circular wrap on C-RL → tries C then A then B ----
+fresh_env
+export MOCK_OP_FAIL_C="rate_limit"; unset MOCK_OP_FAIL_A MOCK_OP_FAIL_B
+mkdir -p "$XDG_RUNTIME_DIR/coo-op-wrap"
+printf C > "$XDG_RUNTIME_DIR/coo-op-wrap/active"
+OP_SERVICE_ACCOUNT_TOKEN="$MOCK_OP_TOKEN_A_VALUE" \
+OP_SERVICE_ACCOUNT_TOKEN_BACKUP="$MOCK_OP_TOKEN_B_VALUE" \
+OP_SERVICE_ACCOUNT_TOKEN_BACKUP2="$MOCK_OP_TOKEN_C_VALUE" \
+rc=0; out="$("$WRAPPER" read 'op://fake/x' 2>&1)" || rc=$?
+# Order should be C (first, RL), then A (next, ok). Should NOT reach B.
+assert_contains "circular C: tried C first" "$out" "TOKEN_BUCKET=C"
+assert_contains "circular C: swapped to A" "$out" "TOKEN_BUCKET=A"
+if printf '%s' "$out" | grep -q "TOKEN_BUCKET=B"; then
+  FAIL=$((FAIL+1)); FAILURES+=("circular C: should not reach B after A succeeded")
+  printf '  FAIL  circular C: should not reach B after A succeeded\n'
+else
+  PASS=$((PASS+1)); printf '  PASS  circular C: stopped at A (no B probe)\n'
+fi
+assert_eq "circular C: rc=0" "$rc" "0"
+assert_eq "circular C: marker=A" "$(cat "$XDG_RUNTIME_DIR/coo-op-wrap/active" 2>/dev/null)" "A"
+
+# ---- TEST 14: BACKUP2 set but BACKUP unset → A → C (skips B slot cleanly) ----
+fresh_env
+export MOCK_OP_FAIL_A="rate_limit"; unset MOCK_OP_FAIL_C
+unset OP_SERVICE_ACCOUNT_TOKEN_BACKUP
+OP_SERVICE_ACCOUNT_TOKEN="$MOCK_OP_TOKEN_A_VALUE" \
+OP_SERVICE_ACCOUNT_TOKEN_BACKUP2="$MOCK_OP_TOKEN_C_VALUE" \
+rc=0; out="$("$WRAPPER" read 'op://fake/x' 2>&1)" || rc=$?
+assert_contains "skip B: attempted A" "$out" "TOKEN_BUCKET=A"
+assert_contains "skip B: cascaded directly to C" "$out" "TOKEN_BUCKET=C"
+if printf '%s' "$out" | grep -q "TOKEN_BUCKET=B"; then
+  FAIL=$((FAIL+1)); FAILURES+=("skip B: should not attempt B (unset)")
+  printf '  FAIL  skip B: attempted B despite being unset\n'
+else
+  PASS=$((PASS+1)); printf '  PASS  skip B: B slot pruned (unset)\n'
+fi
+assert_eq "skip B: rc=0" "$rc" "0"
+assert_eq "skip B: marker=C" "$(cat "$XDG_RUNTIME_DIR/coo-op-wrap/active" 2>/dev/null)" "C"
 
 # ---- Summary ----
 echo
