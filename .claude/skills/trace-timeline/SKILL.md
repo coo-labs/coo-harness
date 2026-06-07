@@ -1,6 +1,6 @@
 ---
 name: trace-timeline
-description: "Render an interactive HTML timeline from a bootstrap-trace run. Use when the user wants to view, visualize, inspect, or \"see\" what happened during a traced boot — process spans, write/read interleavings, snapshot states, the D-group invariant decisions. Triggers on phrases like \"show me the trace\", \"visualize the boot\", \"timeline of the trace\", \"interactive diagram of the trace\", \"render the trace\", or when investigating a `~/.vade/traces/<run-id>/` directory and a chart would be clearer than text. Reads `xtrace.log` + `snapshots/*/content/settings.json` + `meta.json`, writes a self-contained HTML file that opens in any browser. Read-only over the trace data. Don't invoke for: running a fresh trace (that's the `bootstrap-trace-init.sh` harness via container UI), proposing fixes to the boot pipeline (the audit pause forbids it), or operating on traces from other tools."
+description: "Render an interactive timeline from a bootstrap-trace run. Use when the user wants to view, visualize, or \"see\" what happened during a traced boot — process spans, write/read interleavings, snapshot states, D-group invariant decisions. Triggers: \"show me the trace\", \"visualize the boot\", \"timeline of the trace\", \"render the trace\", or when investigating a `~/.vade/traces/<run-id>/` directory and a chart beats raw text. Default: uploads the parsed trace to the VADE Console and prints `console.vade-app.dev/trace/?run-id=<id>`. Legacy mode (user asks for an offline file, or Console is unreachable): writes a self-contained HTML via `SendUserFile`. Reads `xtrace.log` + `snapshots/*/content/settings.json` + `meta.json`; read-only. Don't invoke for: running a fresh trace (use `bootstrap-trace-init.sh`) or proposing boot-pipeline fixes (audit pause forbids it)."
 allowed-tools: Bash, Read, SendUserFile
 metadata:
   type: procedural
@@ -58,11 +58,26 @@ report — the harness either hasn't run or its output rolled.
 
 ### 2. Render
 
+**Default — upload to the Console:**
+
+```sh
+URL=$(python3 /home/user/coo-harness/scripts/debug/upload-trace-bundle.py "$TRACE")
+```
+
+`upload-trace-bundle.py` shells out to `render-trace-timeline.py --json`
+to parse the bundle, then POSTs the resulting JSON to
+`/trace/data?run-id=<id>` with bearer auth (`CONSOLE_TOKEN` env, or
+`op://COO/console-bearer-ven/credential` via `op read`). Prints
+`https://console.vade-app.dev/trace/?run-id=<id>` on stdout.
+
+**Legacy — standalone HTML** (only when the user explicitly asks for an
+offline file, or the Console upload fails):
+
 ```sh
 python3 /home/user/coo-harness/.claude/skills/trace-timeline/scripts/render-trace-timeline.py "$TRACE" /tmp/trace-timeline.html
 ```
 
-The script:
+The renderer (invoked by both paths):
 
 - Parses `xtrace.log` (PS4-prefixed, one bash command per line) into
   per-PID lifespans and event lists. Also captures a per-PID
@@ -88,17 +103,25 @@ The script:
       (green / red / gray)
     - `set -euo pipefail` from a user script — script entry (purple)
     - selected `[vade-setup] …` log lines (gray notes)
-- Writes a single self-contained HTML file (~3–4 MB; size scales with
-  command-log volume and process count) with embedded JSON. No CDN
-  dependencies; opens offline.
+- Emits the parsed data: as JSON to stdout when invoked with `--json`
+  (the upload path), or as a single self-contained HTML file with the
+  data embedded (~3–4 MB; the legacy path). HTML mode has no CDN
+  dependencies and opens offline; the Console URL renders the same
+  view from the uploaded JSON.
 
 ### 3. Deliver
+
+**Default**: surface the Console URL captured in §2 with a one-line
+caption. The viewer mirrors the legacy HTML's affordances; the user opens
+the URL in a browser.
+
+**Legacy**: send the standalone HTML file.
 
 ```sh
 SendUserFile /tmp/trace-timeline.html with a one-line caption.
 ```
 
-Orient the user briefly:
+Orient the user briefly (applies to both modes):
 
 - **Default view** is the boot window (0–22 s), noise wrappers
   (`dispatch.sh`, guards, brief `git` subprocesses) hidden.
@@ -162,14 +185,21 @@ write markers in the session-start-sync row immediately around it,
 
 ## Re-running on a fresh trace
 
-The renderer is parameterized. Point it at any `~/.vade/traces/<run-id>/`
-directory — pass the path positionally:
+Both paths are parameterized; point them at any `~/.vade/traces/<run-id>/`
+directory:
 
 ```sh
+# Default: upload to Console
+python3 /home/user/coo-harness/scripts/debug/upload-trace-bundle.py \
+    ~/.vade/traces/bootstrap-trace-XXXX-YYYY
+
+# Legacy: standalone HTML
 python3 /home/user/coo-harness/.claude/skills/trace-timeline/scripts/render-trace-timeline.py \
     ~/.vade/traces/bootstrap-trace-XXXX-YYYY \
     /tmp/trace-timeline.html
 ```
 
-No arguments → defaults to the run named in `~/.vade/traces/CURRENT_RUN_ID`,
-output to `/tmp/trace-timeline.html`.
+No arguments → defaults to the run named in `~/.vade/traces/CURRENT_RUN_ID`.
+The upload path defaults to `https://console.vade-app.dev`; pass
+`--console-url <base>` to override (e.g. against a Pages preview).
+Add `--dry-run` to parse and validate without POSTing.
