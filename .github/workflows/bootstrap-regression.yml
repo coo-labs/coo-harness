@@ -223,6 +223,9 @@ jobs:
       - name: Wrapper — issue-comments (default projection, --full, --limit, --max-bytes)
         run: bash "$GITHUB_WORKSPACE/scripts/ci/test-issue-comments.sh"
 
+      - name: Wrapper — claude-thinking-display-wrap (CLI-arg injection contract)
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/test-claude-thinking-display-wrap.sh"
+
       # ── Token + cache helpers (R11) ──────────────────────────
       - name: op-read retry recovery — install_coo_ssh_keys path
         run: bash "$GITHUB_WORKSPACE/scripts/ci/test-op-retry-recovery.sh"
