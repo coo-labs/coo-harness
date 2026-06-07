@@ -102,6 +102,37 @@ or jsonl access), exact `files` (needs jsonl decryption in the Action),
 token-count and cost columns. The current schema and data sources are
 documented in `coo-labs/coo-logs/index/README.md`.
 
+## Op-read consumption telemetry — `bin/op-read-rollup.py`
+
+`bin/op-read-rollup.py` aggregates per-day 1Password op-read consumption
+across two sources:
+
+- **Session side** — per-call jsonl events emitted by `op-coo-wrap.sh`
+  (Layer 2) and `gh-coo-wrap.sh` `_resolve_pat` (Layer 1), rolled to
+  per-session sidecars at `coo-logs/sessions/YYYY/MM/DD/coo-*.op-reads.jsonl`
+  by the `/end-session` skill (shipped in coo-labs/coo-harness#540).
+- **Actions side** — daily rollup of `1password/load-secrets-action@v2`
+  consumption across `coo-labs/*` workflows, written nightly to
+  `coo-logs/telemetry/op-reads-actions-YYYY-MM-DD.json` by the
+  `op-reads-actions` Action in `coo-labs/coo-logs` (shipped in
+  coo-labs/coo-harness#541).
+
+```sh
+# Session-side rollups (per-script / per-path / per-phase histograms)
+op-read-rollup.py --date 2026-06-07 --by script
+op-read-rollup.py --range 2026-06-01:2026-06-07 --by path
+
+# Combined daily total: sessions + actions
+op-read-rollup.py --combine-with-actions 2026-06-07
+```
+
+The combined view is the canonical answer to "what's our total daily
+op-read consumption?" — the session-side and Actions-side draw on the
+same `OP_SERVICE_ACCOUNT_TOKEN` quota, so neither alone is sufficient.
+
+Origin: briefing-040 (`coo-memory/briefings/040-op-request-volume.md`)
+and its followup plan §4 (`briefings/_followups/040-op-request-volume-plan-2026-06-07-mrcc.md`).
+
 ## Bootstrap CI
 
 PRs that touch `scripts/`, `.claude/`, `.mcp.json`, or
