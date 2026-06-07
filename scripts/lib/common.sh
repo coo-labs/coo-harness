@@ -1510,42 +1510,37 @@ ensure_op_coo_wrap() {
   log "op-coo-wrap: installed (wrapper at $op_path, real binary at $real_path)"
 }
 
-# Install the claude-thinking-display wrapper at /root/.local/bin/claude so
-# every Claude-Code-on-the-Web launch gets `--thinking-display summarized`
-# appended on agent invocations. Restores thinking summaries on Opus 4.7+,
-# whose API default for `thinking.display` is `"omitted"` and whose client-side
-# fallback (`showThinkingSummaries → "summarized"`) is gated by the `!p6()`
-# non-interactive short-circuit. CLI flag bypasses the gate.
-#
-# Mechanism: env-manager's PATH places `/root/.local/bin` before
-# `/opt/node22/bin` (where Anthropic's symlink to the real binary lives), so
-# `claude` resolves through the wrapper, which exec's `/opt/node22/bin/claude`
-# with the flag appended. See scripts/claude-thinking-display-wrap.sh for
-# detection conditions and override knobs.
+# Install the general claude-wrap PATH shim at /root/.local/bin/claude so every
+# Claude-Code-on-the-Web launch resolves through the wrapper, which then
+# injects CLI flags before exec'ing the real binary at /opt/node22/bin/claude.
+# Mechanism: env-manager's PATH places /root/.local/bin before /opt/node22/bin.
+# Active injection blocks live in the wrapper itself; see scripts/claude-wrap.sh
+# for the per-block preconditions and override knobs. Current blocks restore
+# thinking summaries on Opus 4.7+ (MEMO-2026-06-07-4bat) and append Workflow
+# to the launcher tools allowlist (MEMO-2026-06-07-fkef).
 #
 # Bypass: VADE_CLAUDE_WRAP_DISABLE=1 in the cloud env config skips install
-# entirely. The wrapper itself honors CC_THINKING_DISPLAY=omitted at runtime
-# for a softer per-session opt-out.
+# entirely. The wrapper itself honors per-block knobs (CC_THINKING_DISPLAY=omitted,
+# CC_INJECT_WORKFLOW=0) at runtime for a softer per-session opt-out.
 #
-# Cloud-only path guard (root + /home/user); macOS/local installs are
-# untouched.
-install_claude_thinking_display_wrap() {
+# Cloud-only path guard (root + /home/user); macOS/local installs are untouched.
+install_claude_wrap() {
   [ "$(id -u)" = "0" ] && [ -d /home/user ] || return 0
-  [ "${VADE_CLAUDE_WRAP_DISABLE:-0}" = "1" ] && { log "claude-thinking-display-wrap: bypass set; skipping"; return 0; }
+  [ "${VADE_CLAUDE_WRAP_DISABLE:-0}" = "1" ] && { log "claude-wrap: bypass set; skipping"; return 0; }
   local wrapper_src="${1:-}"
   local install_path="/root/.local/bin/claude"
   local real_path="/opt/node22/bin/claude"
   if [ -z "$wrapper_src" ] || [ ! -f "$wrapper_src" ]; then
-    log "claude-thinking-display-wrap: source script missing; skipping"
+    log "claude-wrap: source script missing; skipping"
     return 0
   fi
   if [ ! -e "$real_path" ]; then
-    log "claude-thinking-display-wrap: real binary missing at $real_path; skipping"
+    log "claude-wrap: real binary missing at $real_path; skipping"
     return 0
   fi
   mkdir -p "$(dirname "$install_path")"
   install -m 0755 "$wrapper_src" "$install_path"
-  log "claude-thinking-display-wrap: installed (wrapper at $install_path, real binary at $real_path)"
+  log "claude-wrap: installed (wrapper at $install_path, real binary at $real_path)"
 }
 
 # Fetch COO secrets from 1Password via a schema-driven iterator.
