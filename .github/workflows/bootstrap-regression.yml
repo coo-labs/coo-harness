@@ -236,6 +236,9 @@ jobs:
       - name: bootstrap op caches (materialize_app_key_cache; gh-app-token cache reuse)
         run: bash "$GITHUB_WORKSPACE/scripts/ci/test-bootstrap-op-caches.sh"
 
+      - name: bootstrap allowlist sync (op-coo-wrap transparent swap → .op-sa-identity append)
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/test-coo-bootstrap-allowlist-sync.sh"
+
       - name: materialize_mcp_env (tmpfs MCP env templates; no op:// refs at boot)
         run: bash "$GITHUB_WORKSPACE/scripts/ci/test-materialize-mcp-env.sh"
 
