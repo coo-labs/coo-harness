@@ -5,7 +5,7 @@ name: Auto-merge sync PR (reusable)
 # this repo) which labels every PR it opens with `sync,sync:templates`. Once
 # CI on the consumer PR passes, GitHub's auto-merge feature lands it.
 #
-# Callers: 8 consumer thin-triggers per coo/operations/workflow-centralization.md
+# Callers: 8 consumer thin-triggers per operations/workflow-centralization.md
 # row "auto-merge-sync-pr-reusable.yml". The caller fires on `pull_request:
 # types: [labeled]` and forwards to here; the caller's `if:` gate decides
 # whether the label warrants auto-merge (currently: any label starting with
