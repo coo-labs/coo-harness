@@ -1,0 +1,111 @@
+# CI-health schema — declarative inventory of every CI primitive on the
+# substrate's CI surface. Per coo-memory/operations/ci-strategy.md
+# §"CI-surface observability". Schema location is kernel-scope per
+# MEMO-2026-05-26-t65q (schemas are kernel; the strategy doc itself
+# lives in coo-memory).
+#
+# This file is the source-of-truth Group W's W0 probe (when it lands)
+# will cross-check against the lifecycle log at
+# coo-memory/operations/ci-lifecycle/log.jsonl. Schema entries here +
+# birth events there must be in 1:1 correspondence.
+#
+# Seed entries: the five post-strategy CI primitives + the workflow
+# the same arc lands (substrate-staleness-lint). Future primitives
+# added via PR; the four-slot question (guarantee, loop_position,
+# retirement_criterion, owner) must be answered at birth.
+#
+# Schema authority: per ci-strategy.md §"Schema authority table" —
+# add/remove entries by COO PR (review by receiving session before
+# merge); threshold/ceiling adjustments per the same table.
+
+schema_version: 1
+
+# Implementation status: seed. Per-entry `invariants:` blocks (with
+# threshold/ceiling for the per-check metrics) come with the Group W
+# integrity-check probes (W0-W4 primary + W5-W6 corroborating) in a
+# follow-on epic. The shape of each entry is fixed at seed-time so
+# future probes can attach without renaming.
+implementation_status: seed
+
+checks:
+  - id: pre-push-pr-hygiene
+    tier: 1
+    guarantee: G1
+    loop_position: pre-push
+    owner: vade-coo
+    retirement_criterion: defense-in-depth-perpetual
+    canonical_doc: coo-memory/operations/issue-pr-hygiene.md
+    lifecycle_birth: coo-memory#1016
+    # Defense-in-depth pair with `issue-pr-hygiene-reusable` (at-PR-open).
+    invariants: {}
+
+  - id: pr-ven-human-action-marker
+    tier: 0
+    guarantee: G2
+    loop_position: at-PR-open
+    owner: vade-coo
+    retirement_criterion: structural-fix-cite
+    # Retires when squash-merge format changes or F4 attribution is
+    # restructured (e.g., a single-writer fix replaces the marker
+    # mechanism with a structural rule).
+    canonical_doc: coo-harness/scripts/boot/integrity-check.sh
+    lifecycle_birth: coo-memory#1015
+    invariants: {}
+
+  - id: memo-shape-lint
+    tier: 0
+    guarantee: G1
+    loop_position: at-PR-open
+    owner: vade-coo
+    retirement_criterion: defense-in-depth-perpetual
+    # Defense-in-depth pair with `bin/memo-shape-check.py` pre-push hook.
+    canonical_doc: coo-memory/operations/memo_protocol.md
+    lifecycle_birth: coo-memory#1015
+    invariants: {}
+
+  - id: daily-link-hygiene-flag
+    tier: 0
+    guarantee: G2
+    loop_position: cron
+    owner: vade-coo
+    retirement_criterion: defense-in-depth-perpetual
+    # Daily LLM-driven link-hygiene scan; advisory issue surface.
+    canonical_doc: coo-memory/operations/entity-hyperlinking.md
+    lifecycle_birth: coo-memory#1015
+    invariants: {}
+
+  - id: registry-check
+    tier: 0
+    guarantee: G2
+    loop_position: cron+at-PR-open
+    owner: vade-coo
+    retirement_criterion: defense-in-depth-perpetual
+    canonical_doc: coo-harness/scripts/registry-check.sh
+    lifecycle_birth: coo-memory#1018
+    invariants: {}
+
+  - id: bootstrap-regression
+    tier: 0
+    guarantee: G2
+    loop_position: at-PR-open
+    owner: vade-coo
+    retirement_criterion: defense-in-depth-perpetual
+    # Layer-1 SDK-driven harness test; watches the cloud bootstrap chain
+    # against script-level regressions at PR-open time.
+    canonical_doc: coo-harness/CLAUDE.md "Bootstrap CI"
+    lifecycle_birth: coo-memory#1013
+    invariants: {}
+
+  - id: substrate-staleness-lint
+    tier: 0
+    guarantee: G2
+    loop_position: at-PR-open+cron
+    owner: vade-coo
+    retirement_criterion: defense-in-depth-perpetual
+    # The substrate drift-prevention scaffold: at-PR-open lint catches
+    # new SWEEP-class stale refs introduced by a PR; cron sweep catches
+    # accumulated drift in surfaces no PR touches. Manifest convention:
+    # one file per cross-cutting refactor at coo-memory/bin/manifests/.
+    canonical_doc: coo-memory/operations/ci-strategy.md
+    lifecycle_birth: coo-memory#1219
+    invariants: {}
