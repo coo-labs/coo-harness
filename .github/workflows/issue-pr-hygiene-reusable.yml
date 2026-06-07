@@ -378,6 +378,39 @@ jobs:
               );
             }
 
+            // Naked-reponame sub-check — `<slug>#N` (no `coo-labs/` prefix, no space).
+            // Pattern B's broken-form regex catches this only in closing-keyword
+            // position (Closes/Fixes/Resolves <slug>#N); this fires anywhere in
+            // title or body. Classify by host: same-repo (slug == host) wants bare
+            // `#N`; cross-repo wants `coo-labs/<slug>#N`. Lookbehind `(?<![\w/])`
+            // excludes the valid `coo-labs/<slug>#N` form and wordy false
+            // positives like `xcoo-memory#1`. Discussion carve-out applied for
+            // parity. Closes coo-memory#930 (recurring ref-format hygiene failure).
+            const nakedSlugRe = new RegExp(`(?<![\\w/])(${slugAlt})#(\\d+)`, 'g');
+            const nakedMatches = [...cleanBody.matchAll(nakedSlugRe), ...cleanTitle.matchAll(nakedSlugRe)]
+              .filter(m => !/discussion/i.test(m[0]));
+            if (nakedMatches.length > 0) {
+              const sameRepo = nakedMatches.filter(m => m[1] === repo);
+              const crossRepo = nakedMatches.filter(m => m[1] !== repo);
+              let msg =
+                `**Pattern C — naked reponame form**\n\n` +
+                `Detected ${nakedMatches.length} reference(s) using \`<reponame>#N\` form ` +
+                `(no \`coo-labs/\` prefix). Autolinks but doesn't satisfy closing-keyword ` +
+                `semantics; reads as a broken form to skim readers expecting either ` +
+                `bare \`#N\` (same-repo) or \`coo-labs/<repo>#N\` (cross-repo).`;
+              if (sameRepo.length > 0) {
+                const ex = sameRepo.slice(0, 5)
+                  .map(m => `  - \`${m[0]}\` → \`#${m[2]}\``).join('\n');
+                msg += `\n\nSame-repo (${sameRepo.length}) — use bare \`#N\`:\n\n${ex}`;
+              }
+              if (crossRepo.length > 0) {
+                const ex = crossRepo.slice(0, 5)
+                  .map(m => `  - \`${m[0]}\` → \`coo-labs/${m[1]}#${m[2]}\``).join('\n');
+                msg += `\n\nCross-repo (${crossRepo.length}) — use \`coo-labs/<repo>#N\`:\n\n${ex}`;
+              }
+              advisories.push(msg);
+            }
+
             // List-inheritance: `coo-labs/<repo>#N, #M, ...` — only first gets prefix.
             // Detect prefix followed by comma-separated #N where subsequent #N lack the prefix.
             const listInheritanceRe = /coo-labs\/[a-z0-9-]+#\d+\s*,\s*#\d+/g;

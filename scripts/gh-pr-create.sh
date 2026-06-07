@@ -267,7 +267,20 @@ fi
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 helper="$script_dir/lib/pr-hygiene-patterns.py"
 if [ -x "$helper" ]; then
-  if ! printf '%s' "$(jq -n --arg t "$title" --arg b "$resolved_body" '{title:$t,body:$b}')" \
+  # Derive bare host-repo name (e.g. "coo-memory") from origin/--repo so the
+  # helper can classify naked-reponame hits as same-repo (suggest bare `#N`)
+  # vs cross-repo (suggest `coo-labs/<repo>#N`). Falls back to empty if we
+  # can't tell; the helper then treats every hit as cross-repo.
+  host_repo_name=""
+  if [ -n "$proxy_url" ]; then
+    host_repo_name="${proxy_repo##*/}"
+  else
+    origin_for_host="${origin_url:-$(git remote get-url origin 2>/dev/null || true)}"
+    if [[ "$origin_for_host" =~ github\.com[:/][^/]+/([^/.]+)(\.git)?/?$ ]]; then
+      host_repo_name="${BASH_REMATCH[1]}"
+    fi
+  fi
+  if ! printf '%s' "$(jq -n --arg t "$title" --arg b "$resolved_body" --arg h "$host_repo_name" '{title:$t,body:$b,host:$h}')" \
       | python3 "$helper"; then
     exit 2
   fi
