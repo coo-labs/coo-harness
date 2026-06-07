@@ -376,6 +376,58 @@ if [ -n "${OP_SERVICE_ACCOUNT_TOKEN_BACKUP:-}" ] || [ -n "${OP_SERVICE_ACCOUNT_T
     fi
   fi
   unset _sentinel_out _sentinel_rc
+
+  # ── Allowlist sync for transparent shim swaps (coo-harness#524) ──────
+  # op-coo-wrap.sh swaps tokens transparently on rate-limit: A→B (or A→B→C)
+  # without surfacing the rate-limit to its caller. So bootstrap's
+  # sentinel-read above can return success even though the active token
+  # is now BACKUP. The _try_sa_fallback branch above never fires (no
+  # rate-limit error visible), and op_whoami_identity_check below would
+  # FATAL because the shim returns BACKUP's user_uuid which the
+  # primary-only allowlist doesn't accept.
+  #
+  # Read the shim's marker file. If it points to B or C *and* the
+  # corresponding token is set in this environment, append the active SA
+  # identity to .op-sa-identity. Skips cleanly when no marker exists
+  # (single-token deployments, shim never swapped) or when the marker
+  # points to A (default; primary is active, no append needed).
+  COO_BOOTSTRAP_STEP="op_marker_identity_sync"
+  _op_pref_file="${XDG_RUNTIME_DIR:-/tmp}/coo-op-wrap/active"
+  if [ -f "$_op_pref_file" ]; then
+    _marker_letter="$(cat "$_op_pref_file" 2>/dev/null || true)"
+    _marker_token_set=0
+    case "$_marker_letter" in
+      B) [ -n "${OP_SERVICE_ACCOUNT_TOKEN_BACKUP:-}" ] && _marker_token_set=1 ;;
+      C) [ -n "${OP_SERVICE_ACCOUNT_TOKEN_BACKUP2:-}" ] && _marker_token_set=1 ;;
+    esac
+    if [ "$_marker_token_set" = "1" ]; then
+      log "coo-bootstrap: op-coo-wrap marker is '${_marker_letter}'; syncing active SA identity to allowlist"
+      # JSON parse mirrors op_whoami_identity_check below and the
+      # _try_sa_fallback append; kept inline to localize the bootstrap
+      # change to this block (no shared helper introduced).
+      _shim_id="$(op whoami --format=json 2>/dev/null | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    for k in ['user_uuid','account_uuid','ServiceAccount','service_account','name','email','user_email']:
+        if k in d and d[k]:
+            print(d[k]); break
+except Exception:
+    pass
+" 2>/dev/null || true)"
+      if [ -n "$_shim_id" ]; then
+        mkdir -p "$(dirname "${HOME}/.vade/.op-sa-identity")"
+        touch "${HOME}/.vade/.op-sa-identity"
+        if ! grep -Fxq "$_shim_id" "${HOME}/.vade/.op-sa-identity" 2>/dev/null; then
+          printf '%s\n' "$_shim_id" >> "${HOME}/.vade/.op-sa-identity"
+          log "coo-bootstrap: appended ${_marker_letter}-token identity '${_shim_id}' to .op-sa-identity allowlist"
+        fi
+      fi
+      unset _shim_id
+    fi
+    unset _marker_letter _marker_token_set
+  fi
+  unset _op_pref_file
 fi
 
 # Identity check via JSON output. The SA token's `op whoami --format=json`
