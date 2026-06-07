@@ -595,34 +595,52 @@ s_check_S7() {
     return
   fi
 
-  # Collect canonical credential values (cred_id + value-from-op).
-  # Skipped on dormant, items with no op_field, or read failures.
+  # Collect canonical credential values: primary op_field AND op_alt_fields.
+  # The two-pass form (one yq invocation per field-class) is byte-identical
+  # across mikefarah-yq and python-yq; a single comma-union expression drops
+  # the second branch under mikefarah (verified v4.44.3, same caveat as S9).
+  # Each row carries `kind` ∈ {primary, alt} so Direction 2 (redactor-escape)
+  # can scope to primary values only — alt fields may legitimately be
+  # non-secret (e.g. r2-transcripts.endpoint, .bucket) and counting them
+  # against escape coverage would false-positive.
   local cred_rows
-  cred_rows="$(yq -r '
-    .credentials[]
-    | select(.status != "dormant")
-    | (.id + "|" + .op_item + "|" + .op_field)' "$schema" 2>/dev/null)" || cred_rows=""
+  cred_rows="$(
+    {
+      yq -r '.credentials[] | select(.status != "dormant") | .id + "|primary|" + .op_item + "|" + .op_field' "$schema" 2>/dev/null
+      yq -r '.credentials[] | select(.status != "dormant") | .id as $id | .op_item as $item | .op_alt_fields[]? | $id + "|alt|" + $item + "|" + .' "$schema" 2>/dev/null
+    }
+  )" || cred_rows=""
 
   if [ -z "$cred_rows" ]; then
     _add S7 skip "no readable credentials in schema"
     return
   fi
 
-  # Read each value once; cache in a flat string-joined buffer keyed by
-  # credential id. Bash 4 associative arrays are available on every
-  # supported surface so use them.
+  # Two tables:
+  #   _s7_values   keyed by "<cred_id>:<field>" — every readable value
+  #                (primary + alt). Direction 1 (orphan-pattern coverage)
+  #                iterates all of these so an alt-field shape (AKIA in
+  #                r2-transcripts.access-key-id) counts toward coverage.
+  #                Closes the Class C structural gap from #1198.
+  #   _s7_primary keyed by cred_id — primary op_field values only.
+  #                Direction 2 (redactor-escape) iterates only these to
+  #                avoid false-positives on non-secret alt fields.
   declare -A _s7_values=()
-  while IFS='|' read -r cred_id op_item op_field; do
+  declare -A _s7_primary=()
+  while IFS='|' read -r cred_id kind op_item op_field; do
     [ -z "$cred_id" ] && continue
     [ "$op_field" = "(derived)" ] && continue
     local val
     val="$(op read "op://COO/$op_item/$op_field" 2>/dev/null || true)"
     if [ -n "$val" ]; then
-      _s7_values["$cred_id"]="$val"
+      _s7_values["${cred_id}:${op_field}"]="$val"
+      if [ "$kind" = "primary" ]; then
+        _s7_primary["$cred_id"]="$val"
+      fi
     fi
   done <<< "$cred_rows"
 
-  local total_creds=${#_s7_values[@]}
+  local total_creds=${#_s7_primary[@]}
   if [ "$total_creds" -eq 0 ]; then
     _add S7 skip "no credentials readable via op (transient or scope)"
     return
@@ -633,24 +651,25 @@ s_check_S7() {
   # match_required: false are documented justified exceptions per
   # SOP §9 ("every S-invariant passes or carries justified exception")
   # — defense-only patterns with no VADE consumer, chicken-and-egg
-  # (op-service-account-token), empty-op-item (github-pat-classic-public),
-  # multi-field-primary-mismatch (aws-access-key-id). See #1198.
+  # (op-service-account-token). Class C cases (alt-field primary mismatch)
+  # are now resolved structurally via the op_alt_fields loader pass above.
+  # See #1198.
   local pat_rows
   # NOTE: yq's `// true` alternative operator treats `false` as null,
   # collapsing match_required=false to true. Explicit conditional avoids that.
   pat_rows="$(yq -r '.secret_shapes[] | (.name + "|" + .pattern + "|" + (if .match_required == false then "false" else "true" end))' "$schema" 2>/dev/null)" || pat_rows=""
 
   # Direction 1: orphan regex — for every pattern with match_required=true,
-  # ≥1 credential value must match. A pattern with zero matches is "orphan".
-  # Patterns with match_required=false skip this check.
+  # ≥1 credential value (primary or alt) must match. A pattern with zero
+  # matches is "orphan". Patterns with match_required=false skip this check.
   local orphan_patterns=()
   while IFS='|' read -r pname ppat pmatch; do
     [ -z "$pname" ] && continue
     [[ "$ppat" == TBD* ]] && continue
     [ "$pmatch" = "false" ] && continue
     local hit=0
-    for cred_id in "${!_s7_values[@]}"; do
-      if printf '%s' "${_s7_values[$cred_id]}" | grep -qE "$ppat"; then
+    for key in "${!_s7_values[@]}"; do
+      if printf '%s' "${_s7_values[$key]}" | grep -qE "$ppat"; then
         hit=1
         break
       fi
@@ -658,15 +677,15 @@ s_check_S7() {
     [ "$hit" = 0 ] && orphan_patterns+=("$pname")
   done <<< "$pat_rows"
 
-  # Direction 2: escape from redactor — every credential value must
-  # match ≥1 pattern.
+  # Direction 2: escape from redactor — every primary credential value
+  # must match ≥1 pattern. Alt fields are excluded (may be non-secret).
   local escapes=()
-  for cred_id in "${!_s7_values[@]}"; do
+  for cred_id in "${!_s7_primary[@]}"; do
     local matched=0
     while IFS='|' read -r pname ppat; do
       [ -z "$pname" ] && continue
       [[ "$ppat" == TBD* ]] && continue
-      if printf '%s' "${_s7_values[$cred_id]}" | grep -qE "$ppat"; then
+      if printf '%s' "${_s7_primary[$cred_id]}" | grep -qE "$ppat"; then
         matched=1
         break
       fi
@@ -675,7 +694,7 @@ s_check_S7() {
   done
 
   if [ "${#orphan_patterns[@]}" -eq 0 ] && [ "${#escapes[@]}" -eq 0 ]; then
-    _add S7 true "registry clean: all patterns matched ≥1 credential and all $total_creds readable credentials matched ≥1 pattern"
+    _add S7 true "registry clean: all patterns matched ≥1 credential value (primary or alt) and all $total_creds readable primary credentials matched ≥1 pattern"
   else
     local parts=()
     [ "${#orphan_patterns[@]}" -gt 0 ] && parts+=("orphan-patterns: $(IFS=,; echo "${orphan_patterns[*]}")")
