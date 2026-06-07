@@ -994,7 +994,12 @@ deliverables:
     producer: coo-harness/scripts/boot/integrity-check.sh
     severity: critical
 EOF
+# Compute and inject the fixture's SHA so the brake's manifest-SHA pin
+# check (SH1, coo-memory#1167) doesn't self-fault before the actual
+# has_jq_path syntax check runs.
+t29_sha=$(sha256sum "$malformed_manifest/operations/boot-deliverables.yml" | cut -d' ' -f1)
 out="$(VADE_COO_MEMORY_DIR_OVERRIDE="$malformed_manifest" \
+  VADE_BRAKE_MANIFEST_SHA256="$t29_sha" \
   _invoke_guard t29 Bash block-on-FAIL "$state_dir" "$home_dir" "ls")"
 if printf '%s' "$out" | grep -q 'unsupported jq path syntax'; then
   _pass "malformed has_jq_path → deny reason names 'unsupported jq path syntax'"
@@ -1017,7 +1022,10 @@ state_dir="$1"; home_dir="$2"
 # integrity-check.json with summary.ok=true satisfies the check.
 mkdir -p "$state_dir" "$home_dir/.vade" "$home_dir/.claude"
 printf '{"summary":{"ok":true}}' > "$state_dir/integrity-check.json"
+# Recompute SHA — the fixture was rewritten with the well-formed entry.
+t29b_sha=$(sha256sum "$malformed_manifest/operations/boot-deliverables.yml" | cut -d' ' -f1)
 out="$(VADE_COO_MEMORY_DIR_OVERRIDE="$malformed_manifest" \
+  VADE_BRAKE_MANIFEST_SHA256="$t29b_sha" \
   _invoke_guard t29b Bash block-on-FAIL "$state_dir" "$home_dir" "ls")"
 if [ -z "$out" ]; then
   _pass "well-formed has_jq_path resolves to OK (no deny output)"
@@ -1373,7 +1381,11 @@ deliverables:
     producer: "producer;`$(rm)<inject>"
     severity: critical
 EOF
+# Pin the fixture's SHA so the brake's manifest-SHA pin check
+# (SH1, coo-memory#1167) doesn't self-fault before sanitization runs.
+t8_sha=$(sha256sum "$t8_manifest_dir/operations/boot-deliverables.yml" | cut -d' ' -f1)
 out8="$(VADE_COO_MEMORY_DIR_OVERRIDE="$t8_manifest_dir" \
+  VADE_BRAKE_MANIFEST_SHA256="$t8_sha" \
   _invoke_guard t8 Bash block-on-FAIL "$state_dir" "$home_dir" "ls")"
 # Extract permissionDecisionReason — the actual string the agent sees in
 # its tool-feedback context. Sanitization is asserted on THIS value, not
