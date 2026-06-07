@@ -63,8 +63,22 @@ _s_schema_json() {
 _s_schema_validator() {
   printf '%s' "${VADE_SECRETS_VALIDATOR:-$VADE_COO_MEMORY_DIR/bin/secrets-schema-check.py}"
 }
-_s_env_snapshot_dir() {
-  printf '%s' "${VADE_SECRETS_SNAPSHOT_DIR:-$VADE_COO_MEMORY_DIR/operations/secrets/env-snapshots}"
+_s_env_snapshot_file() {
+  # Ephemeral per-container env-keyname snapshot. Was a date-stamped
+  # working-tree file under coo-memory/operations/secrets/env-snapshots/
+  # pre-2026-06-07; moved off-tree because daily boot writes flickered
+  # ~24% of keys per session (bootstrap-phase capture variance, post-
+  # Phase-2 op-read retirement, per-session shell vars) and polluted the
+  # working tree on every boot.
+  if [ -n "${VADE_SECRETS_SNAPSHOT_FILE:-}" ]; then
+    printf '%s' "$VADE_SECRETS_SNAPSHOT_FILE"
+    return
+  fi
+  # VADE_SECRETS_SNAPSHOT_DIR is retained as a back-compat override
+  # (test-integrity-group-s.sh sets it per-test) — re-interpreted as
+  # "directory containing the single ephemeral file."
+  local d="${VADE_SECRETS_SNAPSHOT_DIR:-${VADE_CLOUD_STATE_DIR:-$HOME/.vade-cloud-state}}"
+  printf '%s/env-snapshot.txt' "$d"
 }
 
 # ── S1: schema.yaml parses + shape-valid ─────────────────────────
@@ -687,17 +701,17 @@ s_check_S8() {
     return
   fi
 
-  # Persist today's env-keyname snapshot. Keynames only — never values.
-  # NUL-separated records (`env -0`) keep multi-line values (PEM keys,
-  # cert chains) attached to their keyname instead of bleeding
-  # base64 chunks through `cut -d=` as fake keynames. The awk pattern
-  # then drops any record that doesn't start with a valid env-name —
-  # second line of defense if a future container injects junk records.
-  # S10 audits the resulting file; if value-bleed regresses here, the
-  # next integrity run catches it.
-  local snap_dir snap_file
-  snap_dir="$(_s_env_snapshot_dir)"
-  snap_file="${snap_dir}/$(date -u +%Y-%m-%d).txt"
+  # Persist current env-keyname snapshot to an ephemeral per-container
+  # file. Keynames only — never values. NUL-separated records (`env -0`)
+  # keep multi-line values (PEM keys, cert chains) attached to their
+  # keyname instead of bleeding base64 chunks through `cut -d=` as fake
+  # keynames. The awk pattern then drops any record that doesn't start
+  # with a valid env-name — second line of defense if a future container
+  # injects junk records. S10 audits the resulting file; if value-bleed
+  # regresses here, the next integrity run catches it.
+  local snap_file snap_dir
+  snap_file="$(_s_env_snapshot_file)"
+  snap_dir="$(dirname "$snap_file")"
   if [ -n "${VADE_SECRETS_SNAPSHOT_SKIP:-}" ]; then
     :  # test escape: don't write
   elif mkdir -p "$snap_dir" 2>/dev/null; then
@@ -985,43 +999,32 @@ s_check_S9() {
 #
 # Origin: 2026-06-05 near-miss. `env | cut -d= -f1 | sort -u` in S8's
 # snapshot writer let multi-line values (the `vade-coo-app` PEM) bleed
-# as fake keynames into the working-tree snapshot. Stop-hook caught it
-# pre-commit; nothing was pushed. S8 producer fixed in same change;
-# S10 is the defensive layer — any future regression (producer
-# rewrite, manual edit, an Anthropic-injected container var with a
-# pathological shape) is caught at the next integrity-check fire
-# rather than waiting for an alert reader of `git status`.
+# as fake keynames into the snapshot. Stop-hook caught it pre-commit;
+# nothing was pushed. S8 producer fixed in same change; S10 is the
+# defensive layer — any future regression (producer rewrite, manual
+# edit, an Anthropic-injected container var with a pathological shape)
+# is caught at the next integrity-check fire.
 #
-# Test: every line of every file under env-snapshots/*.txt must match
-# the strict env-name regex `^[A-Za-z_][A-Za-z0-9_]*$`. Anything else
-# is value-bleed.
+# Post-2026-06-07: the boot-time snapshot is ephemeral
+# (`$VADE_CLOUD_STATE_DIR/env-snapshot.txt`), not a committed working-
+# tree file. Audit still applies — value-bleed in the writer would
+# corrupt /verify-secrets output downstream.
+#
+# Test: every line of the snapshot must match the strict env-name
+# regex `^[A-Za-z_][A-Za-z0-9_]*$`. Anything else is value-bleed.
 s_check_S10() {
-  local snap_dir; snap_dir="$(_s_env_snapshot_dir)"
-  if [ ! -d "$snap_dir" ]; then
-    _add S10 skip "no snapshot dir at $snap_dir"
+  local snap_file; snap_file="$(_s_env_snapshot_file)"
+  if [ ! -f "$snap_file" ]; then
+    _add S10 skip "no snapshot file at $snap_file"
     return
   fi
-  local bad=() total=0
-  local f n base
-  for f in "$snap_dir"/*.txt; do
-    [ -f "$f" ] || continue
-    total=$((total + 1))
-    # grep -c always prints a count to stdout; exit code is 1 on
-    # zero matches, which `|| true` swallows so command-subst captures
-    # only the count.
-    n=$(grep -cvE '^[A-Za-z_][A-Za-z0-9_]*$' "$f" 2>/dev/null || true)
-    : "${n:=0}"
-    if [ "$n" -gt 0 ]; then
-      base="$(basename "$f")"
-      bad+=("${base}:${n}")
-    fi
-  done
-  if [ "$total" -eq 0 ]; then
-    _add S10 skip "no snapshot files in $snap_dir"
-  elif [ "${#bad[@]}" -eq 0 ]; then
-    _add S10 true "$total snapshot files keynames-only"
+  local n
+  n=$(grep -cvE '^[A-Za-z_][A-Za-z0-9_]*$' "$snap_file" 2>/dev/null || true)
+  : "${n:=0}"
+  if [ "$n" -eq 0 ]; then
+    _add S10 true "snapshot keynames-only ($(basename "$snap_file"))"
   else
-    _add S10 false "snapshot value-bleed (file:invalid_lines): ${bad[*]}"
+    _add S10 false "snapshot value-bleed ($(basename "$snap_file"):${n})"
   fi
 }
 
