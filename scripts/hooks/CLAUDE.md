@@ -22,3 +22,7 @@ Wiring + tests:
 4. Run `bash ../ci/run-bootstrap-regression.sh "$PWD"` against a scratch workspace.
 
 Bypass env vars (grep `VADE_*_BYPASS=` for the live set): `VADE_GITHUB_API_GUARD_BYPASS`, `VADE_WORKFLOW_AUTH_GUARD_BYPASS`, `VADE_SKILL_YAML_GUARD_BYPASS`, `VADE_BRAKE_ENFORCE=warn|off`, `VADE_AGENT_ENV_SCRUB=warn|enforce|disabled`.
+
+---
+
+*If you notice contradictions between the substrate and this file, update it after finishing your current task.*

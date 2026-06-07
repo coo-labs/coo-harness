@@ -13,3 +13,7 @@ Helper: `../../scripts/gh-put-workflow.sh`.
 `bootstrap-regression.yml` is the kernel's CI backstop. Do NOT weaken it by expanding `VADE_CI_ALLOWLIST` without a cited rationale in the PR commit.
 
 PR-open changes here run the full bootstrap-regression suite end-to-end in fake-env mode against a staged `/home/user`.
+
+---
+
+*If you notice contradictions between the substrate and this file, update it after finishing your current task.*

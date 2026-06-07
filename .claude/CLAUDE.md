@@ -10,3 +10,7 @@
 
 Hook implementations: [`../scripts/hooks/CLAUDE.md`](../scripts/hooks/CLAUDE.md).
 Agent definitions: [`agents/README.md`](agents/README.md) — every agent's frontmatter requires `env_allowlist:`.
+
+---
+
+*If you notice contradictions between the substrate and this file, update it after finishing your current task.*

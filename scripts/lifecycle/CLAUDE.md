@@ -10,3 +10,7 @@ Never replace `setsid -f ... &` + `wait $child_pid` with a plain fork or `exec`.
 `post-bootstrap-chain.sh` children (in `../boot/`) must remain fast (<2s) — they block the chain. Digest scripts here (`coo-identity-digest.sh`, `discussions-digest.sh`, `project-board-digest.sh`) print captured context to stdout; log chatter goes to stderr.
 
 `session-idle-watchdog.sh --start` is armed by the chain and triggers the idle-fire close path.
+
+---
+
+*If you notice contradictions between the substrate and this file, update it after finishing your current task.*
