@@ -3,21 +3,21 @@
 op-read-rollup — aggregate per-day op-read consumption from the
 two-layer jsonl sinks shipped by coo-harness#540 / briefing-40.
 
-Reads ~/.vade/op-reads-YYYY-MM-DD.jsonl (one combined file per day,
-distinguished by `layer` field — L1 lines from gh-coo-wrap.sh's
-_resolve_pat decisions, L2 lines from op-coo-wrap.sh's per-call
-events). Emits per-script / per-path / per-phase histograms with
-p50/p95/p99 latency.
+Reads per-session op-reads sidecars at
+coo-logs/sessions/YYYY/MM/DD/coo-<slug>.op-reads.jsonl (one file per
+session, written by /end-session's op-reads export step). Each line
+carries a `layer` field distinguishing L1 (gh-coo-wrap.sh _resolve_pat
+decisions) from L2 (op-coo-wrap.sh per-call events). Emits per-script /
+per-path / per-phase histograms with p50/p95/p99 latency.
 
-Output: markdown table to stdout + structured JSON to
-coo-logs/telemetry/op-reads-rollup-<date>.json when --json-out is set.
+Output: markdown table to stdout; --json-out writes structured JSON.
 
 Usage:
   op-read-rollup.py --date 2026-06-07 --by script
   op-read-rollup.py --date 2026-06-07 --by path
   op-read-rollup.py --date 2026-06-07 --by phase
   op-read-rollup.py --range 2026-06-01:2026-06-07 --by script
-  op-read-rollup.py --date 2026-06-07 --json-out coo-logs/telemetry/op-reads-rollup-2026-06-07.json
+  op-read-rollup.py --date 2026-06-07 --input-dir /path/to/coo-logs/sessions
 
 Exit codes:
   0 — rollup produced
@@ -48,8 +48,9 @@ def parse_args():
     )
     p.add_argument(
         "--input-dir",
-        default=os.path.expanduser("~/.vade"),
-        help="Directory containing op-reads-YYYY-MM-DD.jsonl files",
+        default=_default_input_dir(),
+        help="coo-logs root or sessions directory containing per-session "
+             "op-reads sidecars (default: auto-detect coo-logs)",
     )
     p.add_argument(
         "--json-out",
@@ -81,24 +82,44 @@ def date_range(args):
     return days
 
 
+def _default_input_dir():
+    for cand in (
+        os.path.expanduser("~/GitHub/coo-labs/coo-logs"),
+        "/home/user/coo-logs",
+        os.environ.get("COO_LOGS_DIR", ""),
+    ):
+        if cand and Path(cand).is_dir():
+            return cand
+    return "/home/user/coo-logs"
+
+
 def load_events(input_dir, days, layer_filter):
+    """Walk coo-logs/sessions/YYYY/MM/DD/coo-*.op-reads.jsonl for each day.
+
+    Accepts either a coo-logs root (then walks into ./sessions/) or a
+    pre-resolved sessions root. Sidecar filenames carry the
+    .op-reads.jsonl suffix; the matching session-log .md sits beside.
+    """
+    root = Path(input_dir)
+    sessions_root = root / "sessions" if (root / "sessions").is_dir() else root
     rows = []
     for d in days:
-        path = Path(input_dir) / f"op-reads-{d.isoformat()}.jsonl"
-        if not path.exists():
+        day_dir = sessions_root / d.strftime("%Y") / d.strftime("%m") / d.strftime("%d")
+        if not day_dir.is_dir():
             continue
-        with path.open("r", errors="replace") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    ev = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if layer_filter != "both" and ev.get("layer") != layer_filter:
-                    continue
-                rows.append(ev)
+        for path in sorted(day_dir.glob("*.op-reads.jsonl")):
+            with path.open("r", errors="replace") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        ev = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if layer_filter != "both" and ev.get("layer") != layer_filter:
+                        continue
+                    rows.append(ev)
     return rows
 
 
