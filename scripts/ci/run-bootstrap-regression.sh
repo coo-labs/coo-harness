@@ -102,101 +102,13 @@ rm -rf "$WORKSPACE_ROOT/CLAUDE.md" "$WORKSPACE_ROOT/.mcp.json" \
        "$WORKSPACE_ROOT/.vade-cloud-state"
 mkdir -p "$COO_MEM_DST/coo" "$COO_MEM_DST/identity"
 # Track 4 Phase 1: stage the secrets schema so schema-fetch-secrets.py
-# can parse it during the CI bootstrap. We stage a minimal fixture
-# schema that matches the active credentials the mock op understands,
-# so the schema-iterator path exercises correctly in fake-env mode.
+# can parse it during the CI bootstrap. The fixture lives canonically
+# at scripts/ci/fixtures/secrets-schema-bootstrap.yaml so the same file
+# can be reused by test-track4-schema-iterator.sh — removes the drift
+# point where the embedded heredoc lagged the production op_item names.
 mkdir -p "$COO_MEM_DST/operations/secrets"
-cat > "$COO_MEM_DST/operations/secrets/schema.yaml" << 'SCHEMA_EOF'
-# CI fixture schema for bootstrap-regression (Track 4 Phase 1, coo-memory#871).
-# Contains only the active credentials the mock `op` binary handles.
-# Mirrors the shape of the real schema.yaml; kept minimal to avoid
-# coupling the CI fixture to every future schema change.
-schema_version: 1
-vault: COO
-credentials:
-  - id: github-pat-vade-coo
-    op_item: vade-coo-self-2026-04
-    op_field: token
-    status: active
-    rotation_class: III
-    env_aliases:
-      - GITHUB_MCP_PAT
-      - GITHUB_TOKEN
-
-  - id: github-pat-classic-public
-    op_item: GITHUB_PUBLIC_PAT
-    op_field: credential   # mock uses credential; real schema uses token (TBD confirm)
-    status: active
-    rotation_class: III
-    env_aliases:
-      - GITHUB_PUBLIC_PAT
-
-  - id: agentmail-api-vade-coo
-    op_item: agentmail-vade-coo
-    op_field: credential
-    status: active
-    rotation_class: III
-    env_aliases:
-      - AGENTMAIL_API_KEY
-
-  - id: mem0-api-vade-coo
-    op_item: mem0-vade-coo
-    op_field: credential
-    status: active
-    rotation_class: III
-    env_aliases:
-      - MEM0_API_KEY
-
-  - id: r2-transcripts
-    op_item: r2-transcripts
-    op_field: secret-access-key
-    status: active
-    rotation_class: I
-    env_aliases:
-      - R2_TRANSCRIPTS_ACCESS_KEY_ID
-      - R2_TRANSCRIPTS_SECRET_ACCESS_KEY
-
-  - id: transcripts-age-key
-    op_item: transcripts-age-key
-    op_field: credential
-    status: active
-    rotation_class: IV
-    env_aliases:
-      - TRANSCRIPTS_AGE_IDENTITY
-
-  - id: cloudflare-api-vade-coo
-    op_item: cloudflare-api-token-vade-coo
-    op_field: credential
-    status: active
-    rotation_class: I
-    env_aliases:
-      - CLOUDFLARE_API_TOKEN
-      - CLOUDFLARE_ACCOUNT_ID
-
-  - id: github-app-vade-coo-app
-    op_item: vade-coo-app
-    op_field: private_key
-    status: active
-    rotation_class: II
-    env_aliases:
-      - GITHUB_APP_PRIVATE_KEY
-      - GITHUB_APP_ID
-      - GITHUB_APP_INSTALLATION_ID
-
-  - id: vade-coo-ssh-sign
-    op_item: vade-coo-sign
-    op_field: "private key"
-    status: active
-    rotation_class: IV
-    env_aliases: []
-
-  - id: vade-coo-ssh-auth
-    op_item: vade-coo-auth
-    op_field: "private key"
-    status: dormant
-    rotation_class: IV
-    env_aliases: []
-SCHEMA_EOF
+cp "$RUNTIME_DST/scripts/ci/fixtures/secrets-schema-bootstrap.yaml" \
+   "$COO_MEM_DST/operations/secrets/schema.yaml"
 log "Staged CI fixture schema at $COO_MEM_DST/operations/secrets/schema.yaml"
 cat > "$COO_MEM_DST/CLAUDE.md" <<'EOF'
 # coo-memory CLAUDE.md (CI bootstrap-regression stub)
