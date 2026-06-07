@@ -318,16 +318,21 @@ jobs:
           pip install --quiet jsonschema pyyaml
           bash "$GITHUB_WORKSPACE/scripts/ci/test-integrity-group-s.sh"
 
-      # test-track4-schema-iterator deliberately NOT wired here. Its
-      # assertions require a schema fixture whose credentials carry the
-      # production env_aliases (GITHUB_MCP_PAT, MEM0_API_KEY,
-      # TRANSCRIPTS_AGE_IDENTITY, etc.); the existing fixture at
-      # scripts/ci/fixtures/secrets-schema-clean.yaml uses synthetic
-      # credential names (test-github-pat / test-multi-field / test-
-      # dormant) shaped for test-integrity-group-s.sh's invariants. The
-      # schema iterator is exercised end-to-end by bootstrap-end-to-end
-      # via cloud-setup.sh -> fetch_coo_secrets -> schema-fetch-secrets
-      # .py -> settings.json.env; a broken iterator fails Group D's
-      # invariants. Direct contract testing (§5 fail-closed on invalid
-      # YAML, §6 fail-closed on missing schema) is filed as a follow-on
-      # under coo-memory#933.
+      # ── Track 4 schema-iterator (R7) ─────────────────────────
+      # Direct contract test for scripts/boot/schema-fetch-secrets.py:
+      # per-credential env-alias round-trip on a production-shape fixture
+      # (GITHUB_MCP_PAT, MEM0_API_KEY, TRANSCRIPTS_AGE_IDENTITY, etc.) +
+      # fail-closed paths on invalid / missing schema. Complements the
+      # indirect coverage via bootstrap-end-to-end (cloud-setup.sh ->
+      # fetch_coo_secrets -> schema-fetch-secrets.py -> settings.json.env;
+      # a broken iterator fails Group D's invariants). Wired per
+      # coo-labs/coo-memory#1253.
+      - name: Track 4 schema-iterator (per-credential env-alias round-trip)
+        env:
+          VADE_CI_SCHEMA_PATH: ${{ github.workspace }}/scripts/ci/fixtures/secrets-schema-bootstrap.yaml
+        run: |
+          # Mock op binary on PATH so schema-fetch-secrets.py's
+          # subprocess.run(["op", "read", ...]) resolves to the fake-env
+          # CLI that returns canned vade-coo-shaped responses.
+          export PATH="$GITHUB_WORKSPACE/scripts/ci/mocks:$PATH"
+          bash "$GITHUB_WORKSPACE/scripts/ci/test-track4-schema-iterator.sh"
