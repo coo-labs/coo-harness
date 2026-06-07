@@ -10,7 +10,7 @@ The script:
    bundle into the data blob the React ``/trace/`` route consumes, or
    reads a pre-parsed ``data.json`` via ``--data-json``.
 2. Sources the Console bearer token from ``CONSOLE_TOKEN`` env or from
-   ``op://COO/console-token-2026-05/credential``.
+   ``op://COO/console-bearer-ven/credential``.
 3. POSTs the JSON to ``{console-url}/trace/data?run-id={id}``.
 4. Prints the Console viewer URL on success.
 
@@ -45,7 +45,7 @@ def read_console_token() -> str:
         return env
     try:
         out = subprocess.check_output(
-            ["op", "read", "op://COO/console-token-2026-05/credential"],
+            ["op", "read", "op://COO/console-bearer-ven/credential"],
             stderr=subprocess.PIPE,
         ).decode().strip()
     except FileNotFoundError:
