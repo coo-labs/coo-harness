@@ -1,0 +1,182 @@
+name: Substrate staleness lint (reusable)
+
+# Reusable workflow: at-PR-open lint against the cross-substrate
+# refactor manifests in coo-memory/bin/manifests/. Catches new
+# SWEEP-class stale references a PR introduces, before they accumulate.
+#
+# Per coo-memory/operations/ci-strategy.md §"The five substrate
+# guarantees" G2 (drift-watch) and #1219 locked design (annotation on
+# exit 1, hard-fail on exit 2). Defense-in-depth-perpetual pairs with
+# the cron sweep at coo-labs/.github/.github/workflows/substrate-staleness-cron.yml.
+#
+# Canonical home: coo-labs/coo-harness/.github/workflows/substrate-staleness-lint-reusable.yml
+# Substrate-side counterpart: coo-memory/operations/ci-lifecycle/log.jsonl
+# (birth entry: check_id=substrate-staleness-lint).
+# Schema entry: coo-harness/config/ci-health/schema.yaml.
+#
+# Trigger contract for callers (thin trigger lives at
+# .github/workflows/substrate-staleness-lint.yml in each consumer):
+#
+#   on:
+#     pull_request:
+#       types: [opened, edited, reopened, synchronize]
+#       # `synchronize` IS needed here — unlike body-only checks
+#       # (issue-pr-hygiene drops synchronize to save runner-minutes),
+#       # this lint inspects file contents which DO change on new
+#       # commits. Skipping synchronize would miss drift introduced
+#       # in mid-PR commits.
+#   permissions:
+#     contents: read
+#     pull-requests: write  # for advisory comments
+#   jobs:
+#     lint:
+#       uses: coo-labs/coo-harness/.github/workflows/substrate-staleness-lint-reusable.yml@main
+#       secrets: inherit
+
+on:
+  workflow_call:
+    secrets:
+      VADE_FIELDS_ADMIN_PAT:
+        description: "Org-secret PAT with read access to coo-memory (private). Used to checkout migration-sweep.py + manifests."
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: staleness-lint-${{ github.repository }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout caller PR head
+        uses: actions/checkout@v4
+        with:
+          path: caller
+
+      - name: Checkout coo-memory (script + manifests)
+        uses: actions/checkout@v4
+        with:
+          repository: coo-labs/coo-memory
+          token: ${{ secrets.VADE_FIELDS_ADMIN_PAT }}
+          path: substrate
+          # Pin to @main — manifests are append-only, and pinning to a
+          # SHA would mean every new manifest needs a coo-harness PR to
+          # bump the pin. The verify discipline doesn't permit drift
+          # going the other way; manifests are the canonical map.
+
+      - name: Run migration-sweep verify across all manifests
+        id: sweep
+        env:
+          # repos.yaml lives in coo-labs/.github (public); the resolver
+          # in migration-sweep.py finds it via the multi-candidate path.
+          # Forcing /dev/null here — at-PR-open lint is local-scope by
+          # design (the caller's PR head only). The cross-repo sweep is
+          # the cron's job.
+          REPOS_YAML: /dev/null
+        run: |
+          set -e
+          script="$GITHUB_WORKSPACE/substrate/bin/migration-sweep.py"
+          manifests=( "$GITHUB_WORKSPACE/substrate/bin/manifests"/*.yaml )
+          cd "$GITHUB_WORKSPACE/caller"
+
+          failed=()
+          passed=()
+          report=""
+
+          for m in "${manifests[@]}"; do
+            mname=$(basename "$m" .yaml)
+            echo "::group::manifest=$mname"
+            set +e
+            out=$(python3 "$script" --mode verify --manifest "$m" --root . \
+                    --repos-yaml "$REPOS_YAML" --ignore-missing-new \
+                    --format text 2>&1)
+            rc=$?
+            set -e
+            echo "$out"
+            echo "::endgroup::"
+
+            if [ $rc -eq 0 ]; then
+              passed+=("$mname")
+            elif [ $rc -eq 2 ]; then
+              failed+=("$mname")
+              report="${report}### \`${mname}\` — actionable drift\n\n\`\`\`\n${out}\n\`\`\`\n\n"
+            else
+              # Unexpected exit code (3 = manifest load error, anything else).
+              # Treat as hard failure: the lint must be loud, not silent.
+              failed+=("$mname (exit $rc)")
+              report="${report}### \`${mname}\` — lint error (exit ${rc})\n\n\`\`\`\n${out}\n\`\`\`\n\n"
+            fi
+          done
+
+          {
+            echo "passed_count=${#passed[@]}"
+            echo "failed_count=${#failed[@]}"
+            echo "passed_list=${passed[*]}"
+            echo "failed_list=${failed[*]}"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ ${#failed[@]} -gt 0 ]; then
+            {
+              echo 'report<<EOF'
+              printf '%b' "$report"
+              echo 'EOF'
+            } >> "$GITHUB_OUTPUT"
+            exit 1   # job-level fail; the comment-post step below uses
+                     # `if: failure()` to surface the report.
+          fi
+
+      - name: Post advisory comment with drift report
+        if: failure() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const report = process.env.REPORT || '';
+            const failedList = process.env.FAILED_LIST || '(unknown)';
+            const marker = '<!-- substrate-staleness-lint -->';
+            const body = `${marker}\n\n` +
+              `### Substrate staleness lint — actionable drift\n\n` +
+              `This PR introduces or carries SWEEP-class references to ` +
+              `OLD paths in the following manifest(s): \`${failedList}\`.\n\n` +
+              `Each entry below is a file:line site where an OLD path appears ` +
+              `in a non-historical surface. Use the manifest's NEW path instead, ` +
+              `or move the reference under \`_archive/\` / \`audits/\` / a memo body ` +
+              `if it's intentionally historical.\n\n` +
+              `${report}\n\n` +
+              `See \`coo-memory/bin/migration-sweep.py --help\` for the classifier.\n\n` +
+              `*This check is BLOCKING. The cron sweep at ` +
+              `\`coo-labs/.github/.github/workflows/substrate-staleness-cron.yml\` ` +
+              `catches drift that lands without a PR (renames, manual edits).*`;
+
+            const pr = context.payload.pull_request;
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr.number,
+              per_page: 100,
+            });
+            const existing = comments.data.find(c =>
+              c.body && c.body.includes(marker) && c.user.type === 'Bot'
+            );
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+                body,
+              });
+            }
+        env:
+          REPORT: ${{ steps.sweep.outputs.report }}
+          FAILED_LIST: ${{ steps.sweep.outputs.failed_list }}
