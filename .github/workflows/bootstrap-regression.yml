@@ -165,11 +165,6 @@ jobs:
     # Step order: PreToolUse hooks → Write|Edit/Read hooks → spawn hooks
     # → PostToolUse hooks → wrappers → token+cache helpers → transcript
     # + lifecycle → boot brake → Group S → schema iterator.
-    #
-    # Excluded for now:
-    #   - test-gh-coo-wrap.sh: env-isolation bug (host GITHUB_MCP_PAT
-    #     leaks into the wrapper under test, masking the
-    #     PUBLIC_PAT-unset assertion). File as follow-on under #933.
     runs-on: ubuntu-latest
     timeout-minutes: 6
     steps:
@@ -209,6 +204,9 @@ jobs:
         run: bash "$GITHUB_WORKSPACE/scripts/ci/test-auto-subscribe-pr.sh"
 
       # ── Wrapper contracts (R11) ──────────────────────────────
+      - name: Wrapper — gh-coo-wrap (PAT routing + body augmentation; coo-memory#1252)
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/test-gh-coo-wrap.sh"
+
       - name: Wrapper — op-coo-wrap (SA token rate-limit fallback to BACKUP)
         run: bash "$GITHUB_WORKSPACE/scripts/ci/test-op-coo-wrap.sh"
 
