@@ -1,4 +1,5 @@
 {
+  "enableWorkflows": true,
   "model": "opusplan",
   "effortLevel": "high",
   "showThinkingSummaries": true,
