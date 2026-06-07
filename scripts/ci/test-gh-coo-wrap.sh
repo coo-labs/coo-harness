@@ -231,9 +231,19 @@ assert_contains "-R before --body-file: file content augmented" "$out" "$EXPECTE
 assert_contains "-R before --body-file: original content preserved" "$out" "from a file (with -R)"
 
 # ---- TEST 25: real binary missing AND none on PATH — exit 127 ----
-# Set PATH to dirs that don't contain gh so the fallback also fails.
+# Stage a scratch bin with the wrapper's minimal tooling but no `gh`.
+# Plain PATH=/usr/bin:/bin would pick up a pre-installed `gh` on
+# distros that ship it (notably ubuntu-latest's GitHub Actions image,
+# where /usr/bin/gh is preinstalled and the wrapper would exec it +
+# get a non-127 auth complaint).
+NO_GH_BIN="$WORK/no-gh-bin"
+mkdir -p "$NO_GH_BIN"
+for b in dirname basename grep; do
+  src="$(command -v "$b" 2>/dev/null || true)"
+  [ -n "$src" ] && ln -s "$src" "$NO_GH_BIN/$b"
+done
 ec=0
-err="$(env -i PATH=/usr/bin:/bin HOME="$HOME" COO_GH_REAL=/nonexistent/path \
+err="$(env -i PATH="$NO_GH_BIN" HOME="$HOME" COO_GH_REAL=/nonexistent/path \
        "$WRAPPER" pr create --body "x" 2>&1 >/dev/null)" || ec=$?
 if [ "$ec" = "127" ]; then
   PASS=$((PASS+1))
