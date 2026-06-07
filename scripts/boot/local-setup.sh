@@ -56,7 +56,7 @@ sync_claude_config "$WORKSPACE_ROOT/coo-harness/.claude" "$WORKSPACE_ROOT/.claud
 # symlinks. Source order = priority; first-wins on name conflicts.
 # coo-harness is listed first because plumbing (settings.json hooks,
 # agentmail) shouldn't lose to a same-named primitive
-# in a data repo. Repo list is loaded from scripts/aggregator.yml so
+# in a data repo. Repo list is loaded from config/aggregator.yml so
 # future joins are a config edit, not a script change (coo-memory#952).
 mapfile -t _AGGREGATOR_REPOS < <(load_aggregator_repos)
 aggregate_workspace_claude_config "$WORKSPACE_ROOT" "$WORKSPACE_ROOT/.claude" \

@@ -63,8 +63,13 @@ def read_console_token() -> str:
 
 def parse_via_renderer(trace_dir: str) -> dict:
     """Shell out to render-trace-timeline.py --json - to get the data dict."""
+    # Renderer lives in the trace-timeline skill bundle (PR9b moved it out
+    # of scripts/debug/ to keep the skill self-contained per convention 4).
+    # This script lives at coo-harness/scripts/debug/upload-trace-bundle.py;
+    # walk up two levels then into the skill bundle.
     renderer = os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
+        "..", "..", ".claude", "skills", "trace-timeline", "scripts",
         "render-trace-timeline.py",
     )
     if not os.path.exists(renderer):

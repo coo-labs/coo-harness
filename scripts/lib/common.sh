@@ -440,17 +440,18 @@ _sync_claude_subdir() {
 
 # Print the list of repos to aggregate, one per line.
 #
-# Reads coo-harness/scripts/aggregator.yml (a flat YAML list under
+# Reads coo-harness/config/aggregator.yml (a flat YAML list under
 # the `repos:` key). Falls back to the hardcoded default
 # `coo-harness coo-memory` if the manifest is missing or unparseable,
 # preserving back-compat with pre-aggregator-config snapshots and
 # unblocking CI runs that stage a sandbox without the manifest.
 #
-# Resolves the manifest path from this file's location (one dir up
-# from lib/common.sh), not from $WORKSPACE_ROOT or a caller-supplied
-# $RUNTIME_DIR, so the manifest travels with the boot kernel
-# (coo-harness) and the helper is callable from any of cloud-setup.sh,
-# session-start-sync.sh, or local-setup.sh without extra wiring.
+# Resolves the manifest path from this file's location (lib/common.sh
+# lives at coo-harness/scripts/lib/; manifest sits at coo-harness/config/),
+# not from $WORKSPACE_ROOT or a caller-supplied $RUNTIME_DIR, so the
+# manifest travels with the boot kernel (coo-harness) and the helper is
+# callable from any of cloud-setup.sh, session-start-sync.sh, or
+# local-setup.sh without extra wiring.
 #
 # Prefers yq when present (already on the Ubuntu runner and cloud
 # image); falls back to an awk parse that recognises `- name` entries
@@ -458,11 +459,13 @@ _sync_claude_subdir() {
 # inline `# comment` suffixes, but it intentionally does NOT support
 # flow-style sequences (`repos: [a, b]`) — keep the file block-style.
 load_aggregator_repos() {
-  # Resolve sibling-of-common.sh: this file lives at coo-harness/scripts/lib/,
-  # so the manifest is one directory up. Independent of caller's $RUNTIME_DIR
-  # / $SCRIPT_DIR so the helper works from cloud-setup, session-start-sync,
-  # and local-setup without each having to set RUNTIME_DIR.
-  local manifest="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/aggregator.yml"
+  # Resolve from common.sh's location: this file lives at
+  # coo-harness/scripts/lib/common.sh; the manifest now sits at
+  # coo-harness/config/aggregator.yml (two dirs up + into config/).
+  # Independent of caller's $RUNTIME_DIR / $SCRIPT_DIR so the helper works
+  # from cloud-setup, session-start-sync, and local-setup without each
+  # having to set RUNTIME_DIR.
+  local manifest="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../config" && pwd)/aggregator.yml"
   if [ ! -f "$manifest" ]; then
     log_err "  warn: aggregator manifest not found at $manifest; falling back to default repo list"
     printf '%s\n' coo-harness coo-memory
@@ -518,7 +521,7 @@ load_aggregator_repos() {
 #                     $WORKSPACE_ROOT/.claude (project-scope).
 #   repo1, ...      — repo directory names under workspace_root. The
 #                     canonical source for this list is the manifest at
-#                     coo-harness/scripts/aggregator.yml (see
+#                     coo-harness/config/aggregator.yml (see
 #                     load_aggregator_repos); callers should read it from
 #                     there rather than hardcoding repo names.
 aggregate_workspace_claude_config() {

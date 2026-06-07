@@ -126,7 +126,7 @@ cat "$TRACE/snapshots/<ts>-<tag>-<pid>/metadata/env.txt"
 ### Interactive timeline (Chrome DevTools shape)
 
 ```bash
-python3 /home/user/coo-harness/scripts/debug/render-trace-timeline.py
+python3 /home/user/coo-harness/.claude/skills/trace-timeline/scripts/render-trace-timeline.py
 # → writes /tmp/trace-timeline.html (open in any browser)
 ```
 

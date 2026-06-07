@@ -76,7 +76,7 @@ on:
       - 'scripts/op-*.sh'
       - 'scripts/git-*.sh'
       - 'scripts/check-pat-freshness.sh'
-      - 'scripts/aggregator.yml'
+      - 'config/aggregator.yml'
       - 'scripts/issue-comments.sh'
       # CI driver, mocks, fixtures, individual smoke tests
       - 'scripts/ci/**'
