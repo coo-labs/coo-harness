@@ -17,3 +17,7 @@ VADE_CI_WORKSPACE_ROOT=/tmp/vade-ci-workspace \
 `VADE_CI_ALLOWLIST` — use to acknowledge known-failing invariants (E1–E4 always skip in CI by design, F1–F4 skip on stub coo-memory). Cite the reason in commit/PR. Empty the allowlist once the underlying issue is fixed.
 
 `fixtures/` — point tests at fixtures by name; do not hard-code absolute paths.
+
+---
+
+*If you notice contradictions between the substrate and this file, update it after finishing your current task.*

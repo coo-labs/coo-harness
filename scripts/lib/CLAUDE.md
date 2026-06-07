@@ -10,3 +10,7 @@ Logging functions are NOT interchangeable:
 `integrity-group-s.sh` is NOT standalone — sourced by `integrity-check.sh` only. It calls `_add` defined in the parent scope; standalone execution emits "command not found".
 
 `lib/transcripts/` Python library — imported, not sourced. `sys.path` insert uses `parents[N]` where N depends on the calling script's depth: top-level `scripts/<x>.py` → `parents[1]`; nested `scripts/<sub>/<x>.py` → `parents[2]`. Never `pip install transcripts` — private.
+
+---
+
+*If you notice contradictions between the substrate and this file, update it after finishing your current task.*

@@ -17,3 +17,7 @@
 - Non-fatal on every path: exits 0 even on invariant failures. It is a PROBE, not a repair tool.
 
 CI fake-env signal: `VADE_CI_WORKSPACE_ROOT` or `VADE_BINDIR_OVERRIDE` set. Groups E1–E4 + F1–F4 skip in CI by design.
+
+---
+
+*If you notice contradictions between the substrate and this file, update it after finishing your current task.*
