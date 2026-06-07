@@ -2223,19 +2223,44 @@ _op_to_file() {
   # (`VADE_FORCE_COO_BOOTSTRAP=1`) succeeded after 2 retries on the
   # same ref, suggesting 3 attempts was inside the cold-start window
   # but 5 clears it comfortably.
+  #
+  # Rate-limit fast-fail (briefing-40 T1.2, coo-harness#545): the loop
+  # is inline rather than the generic `retry` helper because we need
+  # to short-circuit on op rate-limit. op-coo-wrap.sh's swap-and-retry
+  # already exhausts the 3-token cascade before any rate-limit error
+  # surfaces here; another 4 attempts at this layer just burns wall
+  # time. Transient errors (5xx, network, timeout) still get the full
+  # 5-attempt budget.
   err_file="$(mktemp 2>/dev/null || echo "/tmp/op-to-file.$$.err")"
   : > "$err_file"
   pref_before="$(cat "${XDG_RUNTIME_DIR:-/tmp}/coo-op-wrap/active" 2>/dev/null || echo "?")"
   start_ms="$(date -u +%s%3N 2>/dev/null || echo 0)"
-  # Capture stderr from the retry chain to err_file so we can both
-  # (a) replay it to the operator (preserving prior log behavior) and
-  # (b) record its tail in the structured jsonl event for #451.
-  content="$(retry 5 op read "$ref" 2>"$err_file")" || rc=$?
+  local _attempt=0 _delay=1
+  local _max=5
+  content=""
+  while [ "$_attempt" -lt "$_max" ]; do
+    _attempt=$((_attempt + 1))
+    rc=0
+    content="$(op read "$ref" 2>"$err_file")" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+      break
+    fi
+    if grep -qiE 'rate.?limit|too many requests' "$err_file" 2>/dev/null; then
+      log_err "  FAIL after ${_attempt}/${_max} attempts: op read $ref (rate-limited; wrap shim's token cascade exhausted; not retrying)"
+      break
+    fi
+    if [ "$_attempt" -lt "$_max" ]; then
+      log_err "  retry ${_attempt}/${_max} for: op read $ref (rc=$rc; sleeping ${_delay}s)"
+      sleep "$_delay"
+      _delay=$((_delay * 2))
+    fi
+  done
   end_ms="$(date -u +%s%3N 2>/dev/null || echo 0)"
   pref_after="$(cat "${XDG_RUNTIME_DIR:-/tmp}/coo-op-wrap/active" 2>/dev/null || echo "?")"
   elapsed_ms=$((end_ms - start_ms))
-  # Preserve prior stderr behavior — retry already wrote its diagnostic
-  # lines to err_file; replay them so existing log consumers see them.
+  # Preserve prior stderr behavior — replay the last attempt's stderr
+  # (op-coo-wrap.sh's trace, the actual op-real error) to the operator
+  # for log consumers that grep for the underlying failure shape.
   cat "$err_file" >&2 2>/dev/null || true
   # Observability: record when the call failed or took non-trivial time
   # (>1s strongly suggests at least one retry attempt; a clean cold cache

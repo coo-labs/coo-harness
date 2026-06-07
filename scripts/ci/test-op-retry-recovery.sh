@@ -9,11 +9,17 @@
 # bootstrap-regression suite). Verify:
 #
 #   1. _op_to_file recovers within the 5-attempt retry budget when
-#      N=2 (first two op-reads fail, third succeeds) — rc=0, target
-#      file written with expected content.
-#   2. _op_to_file fails cleanly when N=5 (every attempt exhausts the
-#      budget) — rc=1, no half-written target file.
-#   3. The structured observability event lands in
+#      N=2 (first two op-reads fail with a transient 503, third
+#      succeeds) — rc=0, target file written with expected content.
+#   2. _op_to_file fails cleanly when N=5 (every transient attempt
+#      exhausts the budget) — rc=1, no half-written target file.
+#   3. _op_to_file fast-fails on rate-limit (post briefing-40 T1.2):
+#      the first op-read attempt returns rate-limit stderr; the loop
+#      breaks immediately without burning the full budget. Wrap shim's
+#      3-token swap-and-retry has already exhausted the cascade by
+#      the time rate-limit surfaces here, so further retries are
+#      pure waste. See coo-harness#545.
+#   4. The structured observability event lands in
 #      ~/.vade/op-read-failures.jsonl with the expected schema.
 #
 # Run: bash scripts/ci/test-op-retry-recovery.sh
@@ -53,13 +59,14 @@ _pass() { PASS=$((PASS+1)); printf '  PASS  %s\n' "$1"; }
 _fail() { FAIL=$((FAIL+1)); FAILURES+=("$1"); printf '  FAIL  %s\n' "$1"; }
 
 # ── Test 1: N=2 → recovers within retry budget ───────────────────
-printf '\nTest 1: _op_to_file recovers when first 2 op-reads fail\n'
+printf '\nTest 1: _op_to_file recovers when first 2 op-reads fail (transient)\n'
 COUNTER="$WORK/counter1"
 echo 0 > "$COUNTER"
 
 # Override `op` as a bash function that consults the counter. First
-# N invocations exit 1 with rate-limit stderr (matching the wrapper's
-# rate-limit detection regex); subsequent invocations succeed.
+# N invocations exit 1 with a transient stderr (503 Service Unavailable
+# — must NOT match the wrapper's `rate.?limit|too many requests` regex
+# or T1.2 fast-fail kicks in); subsequent invocations succeed.
 op() {
   if [ "${1:-}" = "read" ]; then
     local cur next
@@ -67,7 +74,7 @@ op() {
     next=$((cur + 1))
     echo "$next" > "$COUNTER"
     if [ "$cur" -lt 2 ]; then
-      printf '[ERROR] could not read secret: Too many requests. Your client has been rate-limited.\n' >&2
+      printf '[ERROR] could not read secret: HTTP 503 Service Unavailable\n' >&2
       return 1
     fi
     # Successful path: echo the expected canned content for the ref.
@@ -117,10 +124,11 @@ else
 fi
 
 # ── Test 2: N=5 → exhausts budget, _op_to_file fails ─────────────
-printf '\nTest 2: _op_to_file fails cleanly when all 5 retries fail\n'
+printf '\nTest 2: _op_to_file fails cleanly when all 5 transient retries fail\n'
 echo 0 > "$COUNTER"
 
-# Same override; raise the failure budget so all 5 attempts fail.
+# Same override; raise the failure budget so all 5 attempts fail. Use
+# a transient stderr (502) — rate-limit would short-circuit at attempt 1.
 op() {
   if [ "${1:-}" = "read" ]; then
     local cur next
@@ -128,7 +136,7 @@ op() {
     next=$((cur + 1))
     echo "$next" > "$COUNTER"
     if [ "$cur" -lt 5 ]; then
-      printf '[ERROR] could not read secret: Too many requests.\n' >&2
+      printf '[ERROR] could not read secret: HTTP 502 Bad Gateway\n' >&2
       return 1
     fi
     echo "should-not-be-reached"
@@ -168,6 +176,51 @@ if grep -q '"ref":"op://COO/exhaust-ref/value"' "$HOME/.vade/op-read-failures.js
   _pass "N=5: jsonl event recorded with rc!=0 for exhaust-ref"
 else
   _fail "N=5: jsonl missing rc!=0 event for exhaust-ref"
+fi
+
+# ── Test 3: rate-limit → fast-fail (briefing-40 T1.2) ────────────
+printf '\nTest 3: _op_to_file fast-fails on rate-limit (no full-budget burn)\n'
+COUNTER3="$WORK/counter3"
+echo 0 > "$COUNTER3"
+
+# Every attempt returns rate-limit stderr. With T1.2 in place, the loop
+# must break after attempt 1, leaving the counter at exactly 1. With
+# the prior `retry 5 op read`, the counter would reach 5.
+op() {
+  if [ "${1:-}" = "read" ]; then
+    local cur next
+    cur="$(cat "$COUNTER3" 2>/dev/null || echo 0)"
+    next=$((cur + 1))
+    echo "$next" > "$COUNTER3"
+    printf '[ERROR] could not read secret: Too many requests. Your client has been rate-limited.\n' >&2
+    return 1
+  fi
+  return 0
+}
+export -f op
+
+TARGET3="$WORK/target3"
+rm -f "$TARGET3"
+RC3=0
+_op_to_file "op://COO/rate-limit-ref/value" "$TARGET3" 0600 || RC3=$?
+
+if [ "$RC3" -ne 0 ]; then
+  _pass "rate-limit: _op_to_file returned rc=$RC3 (expected non-zero)"
+else
+  _fail "rate-limit: _op_to_file rc=0 (expected non-zero — wrap shim cascade exhausted)"
+fi
+
+if [ ! -f "$TARGET3" ]; then
+  _pass "rate-limit: target file not written"
+else
+  _fail "rate-limit: target file written at $TARGET3 despite rate-limit"
+fi
+
+COUNTER_FINAL3="$(cat "$COUNTER3" 2>/dev/null || echo 0)"
+if [ "$COUNTER_FINAL3" = "1" ]; then
+  _pass "rate-limit: exactly 1 op-read attempt consumed (T1.2 fast-fail)"
+else
+  _fail "rate-limit: counter=$COUNTER_FINAL3 (expected 1; full-budget burn implies T1.2 regression)"
 fi
 
 # ── Summary ──────────────────────────────────────────────────────

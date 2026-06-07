@@ -84,10 +84,14 @@ SESSION_URL=""
 # <NAME>.expiry file holding the unix-time expiry stamp. Tmpfs is in-
 # memory, container-ephemeral, dies on container reboot — within the
 # spirit of Phase 2's "no plaintext at rest" (no disk persistence, no
-# backup surface). TTL is generous (5 min) since PAT rotation runs
-# daily; cache is for amortizing op-read latency + rate-limit pressure,
-# not for freshness control. On op rate-limit or unavailability, stale
-# cache is used as graceful degradation.
+# backup surface). TTL is generous (1 hour, post briefing-40 T1.1) since
+# PAT rotation runs daily; cache is for amortizing op-read latency +
+# rate-limit pressure, not for freshness control. On op rate-limit or
+# unavailability, stale cache is used as graceful degradation. The
+# original 5-min TTL was a guess; instrumentation (Layer 1 jsonl,
+# coo-harness#540) showed observed cache_age_sec p75 ~104s, well under
+# even the 5-min ceiling. Bump rationale + measurement window in
+# MEMO-2026-06-07-ax4s.
 #
 # Cost model:
 #  - env var set (legacy session)        → 0 op-read, env passthrough
@@ -152,7 +156,7 @@ _resolve_pat() {
   local cache_dir="${XDG_RUNTIME_DIR:-/tmp}/coo-gh-pat-cache"
   local cache_file="$cache_dir/$name"
   local expiry_file="$cache_dir/$name.expiry"
-  local ttl=300
+  local ttl=3600
   local now; now="$(date +%s 2>/dev/null || echo 0)"
   # cache_age_sec: file-mtime-based; -1 when cache file absent.
   local _cache_age=-1
