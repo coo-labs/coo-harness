@@ -71,7 +71,7 @@ Optional:
                                        network or PAT)
   GITHUB_MCP_PAT                     — required for auto-PR-on-meta;
                                        absence is a soft skip, not an
-                                       error (per coo-harness#148 A)
+                                       error (per coo-labs/coo-harness#148 A)
 """
 
 from __future__ import annotations
@@ -582,7 +582,7 @@ def _open_meta_pr(
 
         commit_msg = (
             f"meta: auto-commit sidecar for {session_id}\n\n"
-            "Stop hook auto-commit per coo-harness#148 Part A.\n"
+            "Stop hook auto-commit per coo-labs/coo-harness#148 Part A.\n"
             "Pure-add (single file) — eligible for the Night's Watch\n"
             "§4 pure-add merge gate (MEMO-2026-04-26-04 §4)."
         )
@@ -613,7 +613,7 @@ def _open_meta_pr(
             "## Summary\n\n"
             f"Auto-commit of `{rel_sidecar}` for session `{session_id}`.\n"
             "Written by `coo-harness/scripts/lifecycle/session-end-transcript-export.py`\n"
-            "per coo-harness#148 Part A. The encrypted ciphertext is\n"
+            "per coo-labs/coo-harness#148 Part A. The encrypted ciphertext is\n"
             "already in R2; this PR makes the sidecar visible to the\n"
             "transcript-analyzer pipeline.\n\n"
             "## Test plan\n\n"
@@ -863,7 +863,7 @@ def main() -> int:
             _stderr(f"wrote sidecar: {sidecar_path}")
 
         # Best-effort: open a single-file pure-add PR carrying just the
-        # sidecar. Per coo-harness#148 Part A — closes the structural
+        # sidecar. Per coo-labs/coo-harness#148 Part A — closes the structural
         # gap where 78% of sessions skipped committing meta.json.
         # Failures here are logged via export-error, never raised.
         try:

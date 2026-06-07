@@ -170,6 +170,44 @@ assert_pass_with_body_contains \
   --title "session: log" --body "no closes"
 
 echo
+echo "test-gh-pr-create: Pattern-C naked-reponame lint (coo-memory#930)"
+
+# Test origin is coo-labs/coo-harness, so "coo-harness#N" is same-repo,
+# "coo-memory#N" is cross-repo.
+assert_fail_with_exit_and_contains \
+  "naked same-repo ref (coo-harness#42) trips Pattern-C lint" \
+  2 \
+  "naked reponame form" \
+  --title "test" --body $'see coo-harness#42 for context\nCloses #1'
+
+assert_fail_with_exit_and_contains \
+  "naked cross-repo ref (coo-memory#42) trips Pattern-C lint" \
+  2 \
+  "naked reponame form" \
+  --title "test" --body $'see coo-memory#42 for context\nCloses #1'
+
+assert_pass_with_body_contains \
+  "canonical cross-repo form coo-labs/coo-memory#42 passes" \
+  "ARG[1]=pr" \
+  --title "test" --body $'see coo-labs/coo-memory#42 for context\nCloses #1'
+
+assert_pass_with_body_contains \
+  "bare same-repo #42 passes (no slug prefix)" \
+  "ARG[1]=pr" \
+  --title "test" --body $'see #42 for context\nCloses #1'
+
+assert_pass_with_body_contains \
+  "discussion carve-out: coo-memory discussion #42 passes" \
+  "ARG[1]=pr" \
+  --title "test" --body $'see coo-memory discussion #42 for context\nCloses #1'
+
+assert_fail_with_exit_and_contains \
+  "naked-reponame advisory cites both same-repo and cross-repo" \
+  2 \
+  "→ \`#42\`" \
+  --title "test" --body $'see coo-harness#42 + coo-memory#99\nCloses #1'
+
+echo
 if [ "$FAIL" -eq 0 ]; then
   printf 'test-gh-pr-create: %d passed\n' "$PASS"
   exit 0

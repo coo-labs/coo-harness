@@ -40,7 +40,7 @@ def strip_links_and_code(s: str) -> str:
     return s
 
 
-def check_pattern_c(title: str, body: str) -> list[str]:
+def check_pattern_c(title: str, body: str, host_repo: str | None = None) -> list[str]:
     findings: list[str] = []
 
     slug_alt = "|".join(re.escape(s) for s in ACTIVE_SLUGS)
@@ -66,6 +66,40 @@ def check_pattern_c(title: str, body: str) -> list[str]:
             "Examples:\n"
             f"{examples}"
         )
+
+    # Naked-reponame sub-check — `<slug>#N` (no `coo-labs/` prefix, no space).
+    # Pattern B's broken-form regex catches this only in closing-keyword position
+    # (Closes/Fixes/Resolves <slug>#N); this fires anywhere in title or body.
+    # Lookbehind `(?<![\w/])` excludes the valid `coo-labs/<slug>#N` form and
+    # wordy false positives like `xcoo-memory#1`. Discussion carve-out applied
+    # for parity with the cross-repo subcheck.
+    naked_slug_re = re.compile(rf"(?<![\w/])({slug_alt})#(\d+)")
+    naked_matches = [
+        m for m in list(naked_slug_re.finditer(clean_body)) + list(naked_slug_re.finditer(clean_title))
+        if not re.search(r"discussion", m.group(0), re.IGNORECASE)
+    ]
+    if naked_matches:
+        same_repo = [m for m in naked_matches if host_repo and m.group(1) == host_repo]
+        cross_repo = [m for m in naked_matches if not host_repo or m.group(1) != host_repo]
+        msg = (
+            "Pattern C — naked reponame form\n"
+            f"Detected {len(naked_matches)} reference(s) using `<reponame>#N` form "
+            "(no `coo-labs/` prefix). Autolinks but doesn't satisfy closing-keyword "
+            "semantics; reads as a broken form to skim readers expecting either bare "
+            "`#N` (same-repo) or `coo-labs/<repo>#N` (cross-repo)."
+        )
+        if same_repo:
+            ex = "\n".join(
+                f"  - `{m.group(0)}` → `#{m.group(2)}`" for m in same_repo[:5]
+            )
+            msg += f"\n\nSame-repo ({len(same_repo)}) — use bare `#N`:\n{ex}"
+        if cross_repo:
+            ex = "\n".join(
+                f"  - `{m.group(0)}` → `coo-labs/{m.group(1)}#{m.group(2)}`"
+                for m in cross_repo[:5]
+            )
+            msg += f"\n\nCross-repo ({len(cross_repo)}) — use `coo-labs/<repo>#N`:\n{ex}"
+        findings.append(msg)
 
     list_inheritance = re.compile(r"coo-labs/[a-z0-9-]+#\d+\s*,\s*#\d+")
     list_matches = [
@@ -121,8 +155,9 @@ def main() -> int:
     payload = json.load(sys.stdin)
     title = payload.get("title", "") or ""
     body = payload.get("body", "") or ""
+    host_repo = payload.get("host", "") or None
 
-    findings = check_pattern_c(title, body) + check_pattern_d(title, body)
+    findings = check_pattern_c(title, body, host_repo) + check_pattern_d(title, body)
 
     if not findings:
         return 0
