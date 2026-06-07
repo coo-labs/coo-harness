@@ -360,18 +360,75 @@ else
   _fail "PENDING under block-on-FAIL emitted output: $out"
 fi
 
-# ─── Test 13 (NEW): identity_consumed predicate-unmatched event ─
-echo "Test 13 — identity_consumed predicate-unmatched emits diagnostic (SRE F5)"
+# ─── Test 13 (NEW): identity_consumed predicate behavior ────────
+#
+# coo-memory#1175 split this into three cases. The earlier version
+# asserted the diagnostic fires on empty tool-results/; that case is
+# now suppressed (the digest-fit-inline shape was producing constant
+# noise that trained operators to ignore the signal). The three
+# sub-tests cover the post-fix behavior:
+#
+#   13   — tool-results/ absent OR empty: diagnostic suppressed.
+#   13b  — hook-*-stdout.txt present (>1KB): predicate matches; no
+#          diagnostic; identity_consumed FAILs because the agent
+#          hasn't Read the file.
+#   13c  — hook-* file present but no -stdout suffix: convention
+#          drift; diagnostic fires.
+
+echo "Test 13 — identity_consumed predicate suppressed when tool-results/ empty (#1175)"
 set -- $(echo "$(_setup_session_dirs "t13")" | tr '|' ' ')
 state_dir="$1"; home_dir="$2"
 _make_all_deliverables_present "$state_dir" "$home_dir"
 # No persisted-output files exist for session t13. The predicate glob
-# expands to a path under home_dir that has nothing → predicate unmatched.
+# expands to a path under home_dir that has nothing → predicate unmatched
+# AND no hook-* file present → diagnostic suppressed.
 _invoke_guard t13 Bash block-on-FAIL "$state_dir" "$home_dir" "ls" > /dev/null
 if grep -q '"cause":"identity_predicate_unmatched"' "$state_dir/brake-events.jsonl" 2>/dev/null; then
-  _pass "predicate-unmatched event emitted in brake-events.jsonl"
+  _fail "predicate-unmatched event emitted with empty tool-results/ (#1175 regression)"
 else
-  _fail "predicate-unmatched event NOT emitted (events.jsonl content: $(cat "$state_dir/brake-events.jsonl" 2>/dev/null | tail -3))"
+  _pass "predicate-unmatched event suppressed in benign no-overflow case"
+fi
+
+echo "Test 13b — predicate matches when hook-*-stdout.txt fixture present (#1175)"
+set -- $(echo "$(_setup_session_dirs "t13b")" | tr '|' ' ')
+state_dir="$1"; home_dir="$2"
+_make_all_deliverables_present "$state_dir" "$home_dir"
+# Stage a tool-results/ dir with a hook-*-stdout.txt file matching the
+# predicate. Use a 2KB body so it clears the substantive (>1KB) bar.
+tool_results_dir="$home_dir/.claude/projects/-home-user/t13b/tool-results"
+mkdir -p "$tool_results_dir"
+python3 -c "open('$tool_results_dir/hook-SessionStart-stdout.txt','w').write('x'*2048)"
+_invoke_guard t13b Bash block-on-FAIL "$state_dir" "$home_dir" "ls" > /dev/null
+# Predicate matched → identity_consumed evaluated. Agent hasn't Read the
+# file → check returns FAIL with the "overflowed but not Read" reason.
+if grep -q '"deliverable":"identity_consumed"' "$state_dir/boot-brake.t13b.json" 2>/dev/null; then
+  _pass "predicate matched the hook-*-stdout.txt fixture and gated identity_consumed"
+else
+  _fail "predicate did NOT match a hook-*-stdout.txt fixture (sentinel: $(cat "$state_dir/boot-brake.t13b.json" 2>/dev/null | tail -3))"
+fi
+# AND the diagnostic should be suppressed when the predicate cleanly
+# matched (we got substantive matches, no drift to surface).
+if grep -q '"cause":"identity_predicate_unmatched"' "$state_dir/brake-events.jsonl" 2>/dev/null; then
+  _fail "predicate-unmatched event emitted despite substantive match"
+else
+  _pass "no spurious predicate-unmatched event when match succeeds"
+fi
+
+echo "Test 13c — diagnostic fires when hook-* present but no -stdout suffix (drift) (#1175)"
+set -- $(echo "$(_setup_session_dirs "t13c")" | tr '|' ' ')
+state_dir="$1"; home_dir="$2"
+_make_all_deliverables_present "$state_dir" "$home_dir"
+# Stage a hook-prefixed file whose name does NOT match the predicate
+# suffix. Models the "Claude Code persisted-output naming has drifted"
+# case the diagnostic is supposed to catch.
+tool_results_dir="$home_dir/.claude/projects/-home-user/t13c/tool-results"
+mkdir -p "$tool_results_dir"
+python3 -c "open('$tool_results_dir/hook-SessionStart-1780823625482.txt','w').write('x'*2048)"
+_invoke_guard t13c Bash block-on-FAIL "$state_dir" "$home_dir" "ls" > /dev/null
+if grep -q '"cause":"identity_predicate_unmatched"' "$state_dir/brake-events.jsonl" 2>/dev/null; then
+  _pass "predicate-unmatched event emitted on convention drift (hook-* without -stdout)"
+else
+  _fail "drift case NOT surfaced (events.jsonl: $(cat "$state_dir/brake-events.jsonl" 2>/dev/null | tail -3))"
 fi
 
 # ─── Test 14 (NEW): override tamper resistance ──────────────────

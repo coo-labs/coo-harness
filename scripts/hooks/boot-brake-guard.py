@@ -510,6 +510,14 @@ def check_deliverable(entry, env, home, session_id, cwd):
             expanded_glob = predicate_glob
             for var in ("VADE_CLOUD_STATE_DIR", "VADE_COO_MEMORY_DIR", "VADE_RUNTIME_DIR", "HOME"):
                 expanded_glob = expanded_glob.replace(f"${var}", env.get(var, ""))
+            # Resolve the parent directory before glob-escape so the
+            # convention-drift heuristic below can iterdir() the literal
+            # filesystem path (coo-memory#1175). The glob-escaped form
+            # is for matching only.
+            literal_parent = os.path.dirname(expanded_glob)
+            literal_parent = literal_parent.replace(
+                "$CWD_DASHIFIED", cwd.replace("/", "-")
+            ).replace("$SESSION_ID", session_id)
             # Polish P2 (coo-memory#1167): escape glob metacharacters in
             # substituted values so a malicious cwd / session_id can't
             # reshape the glob (e.g. inject `*` or `[` into the literal
@@ -533,18 +541,30 @@ def check_deliverable(entry, env, home, session_id, cwd):
                 except OSError:
                     continue
             if not substantive:
-                # Loud-fail on the surface that "no overflow detected"
-                # could mean either (a) digest fit inline (correct skip)
-                # OR (b) the path convention drifted and the §11
-                # invariant is now silently disabled. SRE F5: surface
-                # this as a diagnostic event so a Phase 1 aggregator
-                # can detect convention drift in the wild.
-                signals.append({
-                    "type": "predicate_unmatched",
-                    "deliverable": entry.get("id", "unknown"),
-                    "expanded_glob": sanitize(expanded_glob),
-                    "matches_total": len(matches),
-                })
+                # Two cases collapse here (coo-memory#1175):
+                #   (a) parent dir absent OR contains no hook-prefixed
+                #       files — digest fit inline, nothing persisted,
+                #       gate is correctly no-op. Suppress diagnostic.
+                #   (b) parent dir contains hook-prefixed files but none
+                #       match the predicate suffix — Claude Code
+                #       file-naming may have drifted; fire diagnostic.
+                # Pre-#1175 the diagnostic fired in (a) too, polluting
+                # the signal so case (b) became hard to spot.
+                has_hook_files = False
+                try:
+                    for f in Path(literal_parent).iterdir():
+                        if f.name.startswith("hook-"):
+                            has_hook_files = True
+                            break
+                except OSError:
+                    pass
+                if has_hook_files:
+                    signals.append({
+                        "type": "predicate_unmatched",
+                        "deliverable": entry.get("id", "unknown"),
+                        "expanded_glob": sanitize(expanded_glob),
+                        "matches_total": len(matches),
+                    })
                 return True, "predicate not present; check skipped", None, signals
         pattern = entry.get("check_arg", "")
         try:
