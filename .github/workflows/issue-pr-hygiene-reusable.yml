@@ -1,7 +1,7 @@
 name: Issue / PR hygiene (reusable)
 
 # Reusable workflow: enforces the four issue/PR hygiene patterns
-# documented in coo-labs/coo-memory:coo/operations/issue-pr-hygiene.md:
+# documented in coo-labs/coo-memory:operations/issue-pr-hygiene.md:
 #
 #   A — Epic-type issues use GitHub's native sub-issue API (advisory)
 #   B — PRs that resolve issues include a closing keyword     (blocking or advisory, per caller)
@@ -16,9 +16,9 @@ name: Issue / PR hygiene (reusable)
 # Canonical home: coo-labs/coo-harness/.github/workflows/issue-pr-hygiene-reusable.yml
 # Centralization design: coo-memory#939 (F7); absorbs coo-memory#767.
 # Host=coo-harness per #939 comment (Public→Private workflow_call fails).
-# Operations doc: coo-labs/coo-memory:coo/operations/workflow-centralization.md
+# Operations doc: coo-labs/coo-memory:operations/workflow-centralization.md
 # Pattern-B promotion cadence: coo-labs/coo-memory:coo/adoption_tracker.md (≥14 days clean)
-# Authority + audit: coo-labs/coo-memory:coo/audits/2026-05-01_issue-pr-hygiene/synthesis.md
+# Authority + audit: coo-labs/coo-memory:audits/2026-05-01_issue-pr-hygiene/synthesis.md
 #
 # Per-repo behavior:
 #   - Pattern-B mode (blocking vs advisory) is the only per-caller knob.
@@ -123,7 +123,7 @@ jobs:
             const isBlocking = (mode === 'blocking');
 
             // ---- Exempt-class detection (skip enforcement entirely) ----
-            // Authority: coo/operations/issue-pr-hygiene.md §"Exempt-class registry"
+            // Authority: operations/issue-pr-hygiene.md §"Exempt-class registry"
             // Defensive union across all caller repos — patterns are
             // whitelists, safe to run anywhere.
 
@@ -240,7 +240,7 @@ jobs:
                 `GitHub's parser only auto-closes the FIRST issue; subsequent refs ` +
                 `stay open silently. Use one \`Closes\` keyword per issue:\n\n` +
                 `    Closes coo-labs/<repo>#N\n    Closes coo-labs/<repo>#M\n\n` +
-                `See coo/operations/issue-pr-hygiene.md §"Closing-keyword discipline" ` +
+                `See operations/issue-pr-hygiene.md §"Closing-keyword discipline" ` +
                 `(in coo-labs/coo-memory).`;
               if (isBlocking) {
                 core.setFailed(`Pattern B (closing keywords) — BLOCKING\n\n${msg}`);
@@ -286,7 +286,7 @@ jobs:
             }
 
             const summary = reasons.join('\n\n');
-            const seeDocs = `See coo/operations/issue-pr-hygiene.md §"Closing-keyword discipline" ` +
+            const seeDocs = `See operations/issue-pr-hygiene.md §"Closing-keyword discipline" ` +
               `(in coo-labs/coo-memory).`;
 
             if (isBlocking) {
@@ -396,7 +396,7 @@ jobs:
             if (!grandfatheredItems.has(pr.number)) {
               // Plural-form noun (`s?`) and range suffix (`#N-#M`, `#N–#M`,
               // `#N - #M`) added per coo-memory#757 audit
-              // (coo/audits/2026-05-13_hyperlinking-sweep/synthesis.md §6).
+              // (audits/2026-05-13_hyperlinking-sweep/synthesis.md §6).
               // The 2026-05-01 audit named the en-dash miss; it remained
               // open in the regex until this extension.
               const collisionTerms = /\b(quorum|instance|briefing|memo|stage|phase|finding|oq|audit|committee|persona|agent|chunk|round|track|step|tier|band|mechanism|hypothesis)s?\s+#\d+(?:\s*[-–]\s*#?\d+)?\b/gi;
@@ -422,7 +422,7 @@ jobs:
                   `(prevents the false-positive autolink; \`MEMO-...\` already has a click-through autolink configured.) ` +
                   `Examples found:\n\n` +
                   dMatches.slice(0, 5).map(m => `  - \`${m[0]}\``).join('\n') +
-                  `\n\nSee \`coo/operations/issue-pr-hygiene.md\` §"Notation rules" (in coo-labs/coo-memory).`
+                  `\n\nSee \`operations/issue-pr-hygiene.md\` §"Notation rules" (in coo-labs/coo-memory).`
                 );
               }
             }
@@ -490,7 +490,7 @@ jobs:
             //   mutation). Distinct from trackedIssues, which reflects markdown
             //   `- [ ] #N` task-list connections only and returns 0 for issues
             //   whose children were linked via the native API. See
-            //   coo/operations/issue-pr-hygiene.md §"GraphQL gotchas" (in coo-labs/coo-memory).
+            //   operations/issue-pr-hygiene.md §"GraphQL gotchas" (in coo-labs/coo-memory).
             let result;
             try {
               result = await github.graphql(`
@@ -546,7 +546,7 @@ jobs:
               `they're invisible to GraphQL queries and the project board's tracker UI.\n\n` +
               `Add sub-issues via the GitHub UI's "Add sub-issue" button on this issue, ` +
               `or via the GraphQL \`addSubIssue\` mutation.\n\n` +
-              `See \`coo/operations/issue-pr-hygiene.md\` §"Sub-issue linkage" ` +
+              `See \`operations/issue-pr-hygiene.md\` §"Sub-issue linkage" ` +
               `(in coo-labs/coo-memory).\n\n` +
               `*This is advisory; the check does not block merge. ` +
               `Apply label \`hygiene:exempt\` to suppress on this issue.*`;
