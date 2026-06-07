@@ -49,6 +49,12 @@
 #   COO_OP_REAL=/path/to/op-real   — alternate real-binary path
 #   COO_OP_WRAP_DISABLE=1          — bypass the shim entirely (exec op-real)
 #   COO_OP_WRAP_TRACE=1            — write decisions to /dev/shm/coo-op-wrap.trace
+#   COO_OP_CACHE=0                 — disable the read-side cache (T3.1)
+#   COO_OP_CACHE_TTL=<seconds>     — cache TTL (default 3600, matches the
+#                                    1-hour identical-path-repeat window
+#                                    measured in briefing-40 day-of-record
+#                                    data; 74.4% of L2 reads were repeats
+#                                    within this window — coo-harness#562)
 #
 # Marker (DO NOT REMOVE): COO-OP-COO-WRAP-MARKER-v1
 
@@ -223,8 +229,9 @@ _log_setup() {
 }
 
 # Emit one Layer 2 jsonl event. Arguments: rc, token_slot, latency_ms,
-# attempt_index (1-based), stderr_tail (truncated). No-op when logging
-# disabled, log_path unresolvable, or cap reached.
+# attempt_index (1-based), stderr_tail (truncated), cache_decision
+# (T3.1 — empty string for non-cacheable subcommands or cache-disabled).
+# No-op when logging disabled, log_path unresolvable, or cap reached.
 _emit_event() {
   [ "$COO_OP_WRAP_LOG_READS" = "1" ] || return 0
   [ -n "$_log_path" ] || return 0
@@ -235,7 +242,7 @@ _emit_event() {
     [ "$_count" -ge "$_log_max" ] 2>/dev/null && return 0
   fi
 
-  local rc="$1" token="$2" latency_ms="$3" attempt="$4" stderr_tail="${5:-}"
+  local rc="$1" token="$2" latency_ms="$3" attempt="$4" stderr_tail="${5:-}" cache_decision="${6:-}"
   local ts rate_limited=false
   ts="$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
   _is_rate_limit "$stderr_tail" && rate_limited=true
@@ -243,7 +250,7 @@ _emit_event() {
   # Truncate stderr_tail to 240 chars before escaping.
   stderr_tail="${stderr_tail:0:240}"
 
-  printf '{"ts":"%s","layer":"L2","session_id":"%s","container_id":"%s","phase":"%s","caller_pid":%d,"caller_cmd":"%s","op_subcommand":"%s","op_path":"%s","token_slot":"%s","latency_ms":%d,"rc":%d,"rate_limited":%s,"retry_attempt_index":%d,"stderr_tail":"%s"}\n' \
+  printf '{"ts":"%s","layer":"L2","session_id":"%s","container_id":"%s","phase":"%s","caller_pid":%d,"caller_cmd":"%s","op_subcommand":"%s","op_path":"%s","token_slot":"%s","latency_ms":%d,"rc":%d,"rate_limited":%s,"retry_attempt_index":%d,"stderr_tail":"%s","cache_decision":"%s"}\n' \
     "$ts" \
     "$(_je "$_session_id")" \
     "$(_je "$_container_id")" \
@@ -258,21 +265,76 @@ _emit_event() {
     "$rate_limited" \
     "$((attempt - 1))" \
     "$(_je "$stderr_tail")" \
+    "$(_je "$cache_decision")" \
     >> "$_log_path" 2>/dev/null || true
 }
 
 # One-shot setup (resolves session, phase, caller info, op-sub/path).
 _log_setup "$@"
 
+# ── T3.1 — Session-scope op-read cache (briefing-40 plan §3, coo-harness#562) ──
+# Eliminates redundant op-reads of the same op:// path within a 1-hour
+# window. Day-of-record data (2026-06-07) showed 74.4% of L2 reads were
+# identical-path repeats; cache short-circuits those before the cascade.
+#
+# Key shape: sha256(argv-after-`op`). Argv-based rather than path-only
+# so flag differences (`--no-newline`, `--field`, etc.) don't return the
+# wrong-shape output from the same op:// path. Filenames are path-
+# anonymous in the filesystem (the original op:// path is not derivable
+# from the hex digest).
+#
+# Cached only for `read` — the subcommand whose output is deterministic
+# for a given (path, flags) tuple within the TTL. All other subcommands
+# (whoami / signin / item / vault / etc.) pass through untouched.
+#
+# Container-ephemeral (tmpfs); cache is forgotten on reboot. Mid-session
+# credential rotation should clear the cache (rotate-credential follow-up).
+COO_OP_CACHE="${COO_OP_CACHE:-1}"
+COO_OP_CACHE_TTL="${COO_OP_CACHE_TTL:-3600}"
+_cache_dir="${XDG_RUNTIME_DIR:-/tmp}/coo-op-cache"
+_cache_file=""
+_cache_key=""
+_can_cache=0
+if [ "$COO_OP_CACHE" = "1" ] && [ "$_op_sub" = "read" ] && [ -n "$_op_path" ]; then
+  _cache_key="$(printf '%s\n' "$@" | sha256sum 2>/dev/null | head -c 64)"
+  if [ -n "$_cache_key" ]; then
+    _cache_file="$_cache_dir/$_cache_key"
+    _can_cache=1
+  fi
+fi
+
+# Cache hit — serve from tmpfs, skip the cascade entirely. Latency
+# captures the cat-and-read overhead so the rollup can distinguish
+# warm-cache (<1ms) from cold-fetch (~100ms+).
+if [ "$_can_cache" -eq 1 ] && [ -f "$_cache_file" ]; then
+  _now="$(date +%s 2>/dev/null || echo 0)"
+  _mtime="$(stat -c %Y "$_cache_file" 2>/dev/null || stat -f %m "$_cache_file" 2>/dev/null || echo 0)"
+  _age=$((_now - _mtime))
+  if [ "$_age" -lt "$COO_OP_CACHE_TTL" ]; then
+    _trace "cache-hit: argv-sha=$_cache_key age=${_age}s path=$_op_path"
+    _start_ms="$(date -u +%s%3N 2>/dev/null || echo 0)"
+    cat "$_cache_file"
+    _end_ms="$(date -u +%s%3N 2>/dev/null || echo 0)"
+    _emit_event 0 "$_pref" "$((_end_ms - _start_ms))" 1 "" "cache-hit"
+    exit 0
+  fi
+fi
+
 # Buffer stderr so we can inspect for rate-limit while still replaying
-# verbatim. Stdout flows through directly — op's interesting payload is
-# on stdout, and capturing it would risk truncating large reads.
+# verbatim. Stdout flows through directly for non-cacheable subcommands
+# (capturing it would risk truncating large reads from `op item get`).
+# For cacheable `op read` calls, stdout is captured to a tmpfile so we
+# can both write it to the cache and stream it through unchanged.
 _err_tmp=""
-_cleanup() { [ -n "$_err_tmp" ] && rm -f "$_err_tmp" || true; }
+_cleanup() {
+  [ -n "$_err_tmp" ] && rm -f "$_err_tmp" || true
+  [ -n "${_out_tmp:-}" ] && rm -f "$_out_tmp" || true
+}
 trap _cleanup EXIT
 
 _err_tmp="$(mktemp 2>/dev/null || echo "/tmp/op-coo-wrap.$$.err")"
 : > "$_err_tmp"
+_out_tmp=""
 
 # Iterate through configured tokens. Each attempt:
 #   - rc=0 OR non-rate-limit error → stop (don't keep probing on legitimate failures)
@@ -285,14 +347,60 @@ _stopped_name=""
 _attempt=0
 _n_tokens=${#_toks[@]}
 
+# T3.1: when caching is in play, capture stdout to a tmpfile so we can
+# write it to the cache before streaming it on; otherwise stdout flows
+# through op-real directly.
+if [ "$_can_cache" -eq 1 ]; then
+  _out_tmp="$(mktemp 2>/dev/null || echo "/tmp/op-coo-wrap.$$.out")"
+fi
+
+# _run_real <token-or-empty> <token-name-for-event> -- <script-argv...>
+#   - Honors $_can_cache for stdout capture.
+#   - On rc=0 with cache enabled: populates the cache file (0600).
+#   - Emits the L2 event with the appropriate cache_decision.
+#   - Sets caller-visible: _rc, _err_tmp populated.
+_run_real() {
+  local _t="$1" _n="$2"
+  shift 2
+  local _start_ms _end_ms _decision=""
+  _start_ms="$(date -u +%s%3N 2>/dev/null || echo 0)"
+  if [ "$_can_cache" -eq 1 ]; then
+    : > "$_out_tmp"
+    if [ -n "$_t" ]; then
+      OP_SERVICE_ACCOUNT_TOKEN="$_t" "$REAL_OP" "$@" >"$_out_tmp" 2>"$_err_tmp"
+    else
+      "$REAL_OP" "$@" >"$_out_tmp" 2>"$_err_tmp"
+    fi
+    _rc=$?
+    _end_ms="$(date -u +%s%3N 2>/dev/null || echo 0)"
+    if [ "$_rc" -eq 0 ]; then
+      mkdir -p "$_cache_dir" 2>/dev/null || true
+      chmod 0700 "$_cache_dir" 2>/dev/null || true
+      local _save_umask; _save_umask="$(umask)"
+      umask 0177
+      cp "$_out_tmp" "$_cache_file" 2>/dev/null || true
+      umask "$_save_umask"
+      _decision="cache-miss-new"
+      _trace "cache-miss-new: argv-sha=$_cache_key path=$_op_path slot=$_n"
+    fi
+    cat "$_out_tmp"
+  else
+    if [ -n "$_t" ]; then
+      OP_SERVICE_ACCOUNT_TOKEN="$_t" "$REAL_OP" "$@" 2>"$_err_tmp"
+    else
+      "$REAL_OP" "$@" 2>"$_err_tmp"
+    fi
+    _rc=$?
+    _end_ms="$(date -u +%s%3N 2>/dev/null || echo 0)"
+  fi
+  _emit_event "$_rc" "$_n" "$((_end_ms - _start_ms))" "$_attempt" "$(head -c 240 "$_err_tmp" 2>/dev/null || true)" "$_decision"
+}
+
 if [ "$_n_tokens" -eq 0 ]; then
   # No tokens at all — let op surface its own auth error.
+  _attempt=1
   _trace "attempt 1: no tokens configured; running real op without OP_SERVICE_ACCOUNT_TOKEN"
-  _start_ms="$(date -u +%s%3N 2>/dev/null || echo 0)"
-  "$REAL_OP" "$@" 2>"$_err_tmp"
-  _rc=$?
-  _end_ms="$(date -u +%s%3N 2>/dev/null || echo 0)"
-  _emit_event "$_rc" "?" "$((_end_ms - _start_ms))" 1 "$(head -c 240 "$_err_tmp" 2>/dev/null || true)"
+  _run_real "" "?" "$@"
 else
   for _i in "${!_toks[@]}"; do
     _attempt=$((_attempt + 1))
@@ -300,11 +408,7 @@ else
     _t="${_toks[$_i]}"
     [ "$_attempt" -gt 1 ] && : > "$_err_tmp"
     _trace "attempt $_attempt: token=$_n argv=$*"
-    _start_ms="$(date -u +%s%3N 2>/dev/null || echo 0)"
-    OP_SERVICE_ACCOUNT_TOKEN="$_t" "$REAL_OP" "$@" 2>"$_err_tmp"
-    _rc=$?
-    _end_ms="$(date -u +%s%3N 2>/dev/null || echo 0)"
-    _emit_event "$_rc" "$_n" "$((_end_ms - _start_ms))" "$_attempt" "$(head -c 240 "$_err_tmp" 2>/dev/null || true)"
+    _run_real "$_t" "$_n" "$@"
     if [ "$_rc" -eq 0 ] || ! _is_rate_limit "$(cat "$_err_tmp" 2>/dev/null)"; then
       _stopped_name="$_n"
       break
@@ -324,6 +428,20 @@ else
     printf '%s' "$_stopped_name" > "$PREF_FILE" 2>/dev/null || true
     _trace "marker -> $_stopped_name (was $_pref)"
   fi
+fi
+
+# T3.1: stale-on-rate-limit fallback. If every token ended in a rate-limit
+# (_stopped_name is empty AND last err is rate-limit) AND a cache file
+# exists (even past TTL), surface the cached value rather than fail the
+# call — same posture as gh-coo-wrap's _resolve_pat stale-fallback. The
+# fallback emits one extra event with cache_decision=cache-miss-stale-fallback
+# so the rollup can quantify how often the cache absorbs throttle storms.
+if [ "$_can_cache" -eq 1 ] && [ "$_rc" -ne 0 ] && [ -z "$_stopped_name" ] \
+   && [ -f "$_cache_file" ] && _is_rate_limit "$(cat "$_err_tmp" 2>/dev/null)"; then
+  _trace "stale-fallback: all tokens rate-limited; serving cached value for $_op_path"
+  cat "$_cache_file"
+  _emit_event 0 "?" 0 "$_attempt" "" "cache-miss-stale-fallback"
+  exit 0
 fi
 
 # Replay stderr verbatim.

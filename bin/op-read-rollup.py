@@ -54,7 +54,7 @@ def parse_args():
     )
     p.add_argument(
         "--by",
-        choices=("script", "path", "phase", "layer", "decision"),
+        choices=("script", "path", "phase", "layer", "decision", "cache_decision"),
         default="script",
         help="Aggregation dimension",
     )
@@ -166,6 +166,8 @@ def aggregate(rows, by):
             return ev.get("layer") or "<unknown>"
         if by == "decision":
             return ev.get("decision") or "<n/a>"
+        if by == "cache_decision":
+            return ev.get("cache_decision") or "<bypass>"
         return "<unknown>"
 
     groups = defaultdict(list)
