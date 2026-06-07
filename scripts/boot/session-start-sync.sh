@@ -48,7 +48,7 @@ fi
 # live in the repo whose data they manipulate; the aggregator surfaces
 # them at the workspace .claude/ so they're invokable from any cwd
 # under the workspace. Repo list is loaded from
-# scripts/aggregator.yml so future joins are a config edit, not a
+# config/aggregator.yml so future joins are a config edit, not a
 # script change (coo-memory#952).
 mapfile -t _AGGREGATOR_REPOS < <(load_aggregator_repos)
 aggregate_workspace_claude_config "$WORKSPACE_ROOT_DERIVED" "$WORKSPACE_ROOT_DERIVED/.claude" \

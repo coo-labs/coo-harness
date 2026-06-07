@@ -17,7 +17,7 @@ whether `VADE_RUNTIME_DIR` was present in `settings.json` at that
 instant. Pan, zoom, click for raw xtrace context.
 
 Companion to the trace capture harness — see
-[`scripts/debug/README.md`](../../scripts/debug/README.md) for the
+[`scripts/debug/README.md`](../../../scripts/debug/README.md) for the
 capture side (`BASH_ENV` + `VADE_BOOTSTRAP_TRACE_MODE=1`).
 
 ## When to use this skill
@@ -59,7 +59,7 @@ report — the harness either hasn't run or its output rolled.
 ### 2. Render
 
 ```sh
-python3 /home/user/coo-harness/scripts/debug/render-trace-timeline.py "$TRACE" /tmp/trace-timeline.html
+python3 /home/user/coo-harness/.claude/skills/trace-timeline/scripts/render-trace-timeline.py "$TRACE" /tmp/trace-timeline.html
 ```
 
 The script:
@@ -166,7 +166,7 @@ The renderer is parameterized. Point it at any `~/.vade/traces/<run-id>/`
 directory — pass the path positionally:
 
 ```sh
-python3 /home/user/coo-harness/scripts/debug/render-trace-timeline.py \
+python3 /home/user/coo-harness/.claude/skills/trace-timeline/scripts/render-trace-timeline.py \
     ~/.vade/traces/bootstrap-trace-XXXX-YYYY \
     /tmp/trace-timeline.html
 ```
