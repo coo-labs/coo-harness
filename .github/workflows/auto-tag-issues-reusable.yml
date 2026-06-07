@@ -9,7 +9,7 @@ name: Auto-tag new issues (reusable)
 # so private + public consumers can both invoke (Public→Private workflow_call
 # resolution fails despite access_level=organization; bridge-form-fields-to-natives.yml
 # is the live in-org precedent for "public canonical, mixed consumers").
-# Operations doc: coo-labs/coo-memory/coo/operations/workflow-centralization.md
+# Operations doc: coo-labs/coo-memory/operations/workflow-centralization.md
 # Canonical taxonomy: https://github.com/coo-labs/coo-memory/blob/main/.claude/skills/filing-issues/references/issue-fields-and-types.md
 # Canonical project:  https://github.com/orgs/coo-labs/projects/1 (VADE)
 #   Project node ID:  PVT_kwDOEGdN_84BUV2r
@@ -224,7 +224,7 @@ jobs:
                  none). Use the GitHub UI title (e.g.,
                  "Substrate Hygiene and Tooling"), NOT the M-prefix.
                  Pick at most one per its scope-rule + test (canonical:
-                 https://github.com/coo-labs/coo-memory/blob/main/coo/audits/2026-05-20_milestone-taxonomy/README.md):
+                 https://github.com/coo-labs/coo-memory/blob/main/audits/2026-05-20_milestone-taxonomy/README.md):
                    "Decentering the Mind" — substantive edit / review /
                      support for the "Decentering the Mind" essay or
                      its peer-review atoms. Excludes the general
