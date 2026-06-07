@@ -109,3 +109,24 @@ checks:
     canonical_doc: coo-memory/operations/ci-strategy.md
     lifecycle_birth: coo-memory#1219
     invariants: {}
+
+  - id: consistency-sweep
+    tier: 0
+    guarantee: G2
+    loop_position: at-PR-open+cron
+    owner: vade-coo
+    retirement_criterion: defense-in-depth-perpetual
+    # Per-epic cross-artifact-consistency sweep. Sibling to
+    # substrate-staleness-lint at the SAME guarantee (G2 drift-watch)
+    # but DIFFERENT scope: per-epic within-content drift (skill counts,
+    # invariant ranges, taxonomy enumerations) vs cross-cutting
+    # path/name drift. Each multi-file epic ships sweep-protocol.md +
+    # file-collection.md under audits/<slug>/; the consistency-sweep
+    # agent reads them and emits a findings table. CI fires on
+    # last-PR-of-epic (closing-keyword + GraphQL subIssues heuristic +
+    # epic-last-pr label fallback) and monthly cron. Per-epic results
+    # at coo-memory/operations/consistency-sweep/log/<slug>.md;
+    # aggregator at coo-memory/bin/consistency-sweep-log-aggregate.py.
+    canonical_doc: coo-memory/operations/consistency-sweep/README.md
+    lifecycle_birth: coo-memory#929
+    invariants: {}
