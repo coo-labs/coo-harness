@@ -1055,6 +1055,22 @@ F1_ALLOWLIST_SHA=(
   # in body context but the F1 regex matches neither MEMO-... nor #N
   # forms. Clear linkage to #871 Track close-out; F1 regex miss only.
   "aa645c5315"
+  # 6542a1be51 — "funding/billing: file 1Password credit invoice in_1Tfpth
+  # (Jun 7 2026)" by Coo on 2026-06-08, merged via coo-memory#1329. First
+  # agent-authored receipt filing under funding/billing/ (precedent: BDFL
+  # uploads receipts directly per funding/billing/README.md "Who writes
+  # here"). Vendor receipts are pure archive — vendor-issued PDFs with the
+  # vendor's own identifier in the filename — and carry no decision content
+  # that would warrant a memo or issue citation. The vendor invoice ID
+  # `in_1TfpthHBax7L5HDfdwcnBTMX` is present in the body but doesn't match
+  # the F1 regex (MEMO-YYYY-MM-DD-suffix or #NNN). Already pushed to
+  # origin/main — rewriting public history is the wrong tradeoff.
+  # Systemic gap: any agent-filed vendor receipt under funding/billing/
+  # will hit this same shape; consider excluding `^funding/billing/` from
+  # the F1 scope regex (structurally similar to the existing _archive/
+  # carve-out — receipts are archive, not decision content). Surfaced in
+  # the PR that adds this entry.
+  "6542a1be51"
 )
 if [ -d "$F_REPO/.git" ] && check_cmd git; then
   f1_total=0
@@ -1215,6 +1231,28 @@ F4_ALLOWLIST_SHA=(
   # origin/main — rewriting public history is the wrong tradeoff.
   # Allowlisted with full causal record above; no policy gap.
   "d3479467e8"
+  # 8354ca0d6f — coo-memory commit "coo-on-assign: flip thin trigger
+  # from assigned to field_added (PR3/4)" on 2026-06-07, merged via
+  # coo-memory#1327. Author leaked as vade-coo-app[bot] <286614649+
+  # vade-coo-app[bot]@users.noreply.github.com>; committer correctly
+  # set to Coo <coo@vade-app.dev>. Root cause: the diff touches
+  # `.github/workflows/coo-on-assign.yml`, which requires the
+  # `vade-coo-app` GitHub App install-token write authority (the
+  # OAuth that authenticates `git push` lacks the `workflow` scope —
+  # see coo-memory/CLAUDE.md "To commit a file the session's OAuth
+  # lacks scope for ..."). The pr-ven-human-action-marker workflow
+  # correctly skipped marker injection because the PR author was
+  # `vade-coo` (the COO opens own PRs); on rebase-merge the original
+  # commit SHA was preserved, carrying the App author email forward.
+  # F4's PR-body fallback can't reach PR #1327 either because the
+  # subject ends in "(PR3/4)" rather than "(#1327)". Already pushed
+  # to origin/main — rewriting public history is the wrong tradeoff.
+  # Systemic gap: any workflow-file commit made via App install-token
+  # in a `vade-coo`-authored PR will hit this same shape; consider a
+  # follow-on that accepts the App-bot author email as COO attribution
+  # outright, rather than per-commit allowlisting. Surfaced in the PR
+  # that adds this entry.
+  "8354ca0d6f"
 )
 if [ -d "$F_REPO/.git" ] && check_cmd git; then
   f4_total=0
