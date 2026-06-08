@@ -158,9 +158,7 @@ def _bucket_from_env_or_op() -> str:
         return bucket
     bucket = _op_read("op://COO/r2-transcripts/bucket")
     if not bucket:
-        raise R2Error(
-            "bucket name unresolvable via env (R2_TRANSCRIPTS_BUCKET) or 1Password"
-        )
+        raise R2Error("bucket name unresolvable via env (R2_TRANSCRIPTS_BUCKET) or 1Password")
     return bucket
 
 
