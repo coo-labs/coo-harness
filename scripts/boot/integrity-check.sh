@@ -1516,11 +1516,31 @@ fi
 #   - S7: skip if op CLI not live.
 #   - S8: works everywhere — classifies current process env against
 #         schema + writes today's keynames snapshot.
+#
+# Phase gate (briefing-40 T2.1, coo-harness#563): S3/S4/S7 each iterate
+# the full credential set with `op read` / `op item get`, costing ~25-30
+# op-reads per integrity-check run. The fast phase fires synchronously
+# from coo-bootstrap.sh's EXIT trap before the boot banner renders;
+# moving the op-touching S-checks to live-phase-only halves cold-boot
+# op-quota use without changing the live-phase contract. The structural
+# checks (S1/S2/S5/S8/S9/S10) do no op-reads and stay in fast phase.
 S_LIB="$SCRIPT_DIR/../lib/integrity-group-s.sh"
 if [ -r "$S_LIB" ]; then
   # shellcheck source=../lib/integrity-group-s.sh
   source "$S_LIB"
-  s_check_all
+  if [ "$VADE_INTEGRITY_PHASE" = "fast" ]; then
+    s_check_S1
+    s_check_S2
+    for _s in S3 S4 S7; do
+      _add "$_s" skip "phase=fast: op-bound check deferred to live pass (coo-harness#563)"
+    done
+    s_check_S5
+    s_check_S8
+    s_check_S9
+    s_check_S10
+  else
+    s_check_all
+  fi
 else
   _add S1 skip "integrity-group-s.sh helper missing at $S_LIB"
 fi
