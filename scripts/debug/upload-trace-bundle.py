@@ -29,6 +29,11 @@ import urllib.request
 
 DEFAULT_CONSOLE = "https://console.vade-app.dev"
 RUN_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+# Coordinated with the trace-timeline renderer and coo-labs/coo-console#46
+# (Console-side accepts whatever shape the harness sends and renders it
+# as /logs/<session_id>). Permissive: matches both Claude Code UUID-shape
+# session ids and ULID-shape cloud session ids.
+SESSION_ID_RE = re.compile(r"^[A-Za-z0-9._-]{8,128}$")
 
 
 def find_default_trace_dir() -> str:
@@ -107,11 +112,31 @@ def main() -> int:
         help="upload a pre-rendered data.json (skips renderer invocation)",
     )
     ap.add_argument(
+        "--session-id",
+        default=None,
+        help=(
+            "stamp every event with this session_id, overriding whatever "
+            "the renderer attributed from snapshot env.txt. Use when the "
+            "trace was captured outside a session (CLAUDE_SESSION_ID "
+            "unset) but the operator knows the session the trace belongs "
+            "to. Console renders the value as a /logs/<session_id> link "
+            "(coo-labs/coo-console#46)."
+        ),
+    )
+    ap.add_argument(
         "--dry-run",
         action="store_true",
         help="parse + validate but do not POST",
     )
     args = ap.parse_args()
+
+    if args.session_id is not None and not SESSION_ID_RE.match(args.session_id):
+        print(
+            f"--session-id {args.session_id!r} fails sanitization "
+            "(allowed: A-Z a-z 0-9 . _ -, length 8-128)",
+            file=sys.stderr,
+        )
+        return 1
 
     if args.data_json:
         with open(args.data_json) as f:
@@ -139,12 +164,23 @@ def main() -> int:
         )
         return 1
 
+    events = data.get("events", []) or []
+    if args.session_id is not None:
+        # Operator override: stamp every event. Mutates the data blob
+        # in place; the POST body below picks up the new values.
+        for ev in events:
+            ev["session_id"] = args.session_id
+
     body = json.dumps(data).encode("utf-8")
     target = f"{args.console_url}/trace/data?run-id={run_id}"
+    events_with_sid = sum(1 for ev in events if ev.get("session_id"))
+    unique_sids = len({ev.get("session_id") for ev in events if ev.get("session_id")})
     print(
         f"PIDs={len(data.get('pids', []))}  "
-        f"events={len(data.get('events', []))}  "
+        f"events={len(events)}  "
         f"snapshots={len(data.get('snapshots', []))}  "
+        f"events_with_session_id={events_with_sid}/{len(events)}  "
+        f"unique_session_ids={unique_sids}  "
         f"bytes={len(body)}",
         file=sys.stderr,
     )
