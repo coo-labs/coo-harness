@@ -16,6 +16,7 @@ import pytest
 from transcripts.r2 import (
     R2Coordinates,
     R2Error,
+    _bucket_from_env_or_op,
     list_keys,
     r2_coordinates,
     read_sidecar,
@@ -158,6 +159,27 @@ class TestR2Coordinates:
         assert "sk-LEAK" not in rep
         assert "https://r2.example" in rep
         assert "bkt" in rep
+
+
+class TestBucketFromEnvOrOp:
+    def test_env_first_skips_op_read(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("R2_TRANSCRIPTS_BUCKET", "bkt-from-env")
+        with patch("transcripts.r2._op_read") as op_read:
+            assert _bucket_from_env_or_op() == "bkt-from-env"
+        op_read.assert_not_called()
+
+    def test_falls_back_to_op_when_env_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("R2_TRANSCRIPTS_BUCKET", raising=False)
+        with patch("transcripts.r2._op_read", return_value="bkt-from-op"):
+            assert _bucket_from_env_or_op() == "bkt-from-op"
+
+    def test_raises_when_both_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("R2_TRANSCRIPTS_BUCKET", raising=False)
+        with (
+            patch("transcripts.r2._op_read", return_value=""),
+            pytest.raises(R2Error, match="R2_TRANSCRIPTS_BUCKET"),
+        ):
+            _bucket_from_env_or_op()
 
 
 class TestReadSidecar:

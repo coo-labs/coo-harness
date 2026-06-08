@@ -149,10 +149,18 @@ def _bucket_from_env_or_op() -> str:
 
     A caller that brings its own boto3 client still needs to tell us which
     bucket; we re-resolve it rather than threading it through every call site.
+    Env-first because CI populates R2_TRANSCRIPTS_BUCKET via
+    1password/load-secrets-action but the `op` CLI is gone from PATH after the
+    action's tempdir is torn down.
     """
+    bucket = os.environ.get("R2_TRANSCRIPTS_BUCKET", "").strip()
+    if bucket:
+        return bucket
     bucket = _op_read("op://COO/r2-transcripts/bucket")
     if not bucket:
-        raise R2Error("bucket name unresolvable via 1Password")
+        raise R2Error(
+            "bucket name unresolvable via env (R2_TRANSCRIPTS_BUCKET) or 1Password"
+        )
     return bucket
 
 
