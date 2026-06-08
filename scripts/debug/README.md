@@ -163,6 +163,18 @@ read and write. Pass `--dry-run` to parse + validate without uploading.
 `--data-json <path>` skips parsing and uploads a pre-rendered blob —
 useful for re-uploading a saved bundle.
 
+Pass `--session-id <id>` to stamp every event with a known session id,
+overriding whatever the renderer attributed from snapshot env.txt. Use
+when the trace was captured outside a real session (e.g. manual run
+where `CLAUDE_SESSION_ID` was not exported) but you want the Console
+events cross-linked to a specific `/logs/<session_id>` page. The
+renderer's automatic attribution is per-PID and uses the
+`CLAUDE_SESSION_ID` value present in the bash invocation's env at
+entry-time (captured in `snapshots/*/metadata/env.txt`); cloud-setup
+build-time PIDs have no session yet and stay un-attributed by design.
+Contract is additive — events without `session_id` render unchanged in
+the Console (`coo-labs/coo-console#46`).
+
 ## How to stop the trace
 
 Three options, descending order of operational simplicity:

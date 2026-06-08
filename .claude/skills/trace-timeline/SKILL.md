@@ -1,6 +1,6 @@
 ---
 name: trace-timeline
-description: "Render an interactive timeline from a bootstrap-trace run. Use when the user wants to view, visualize, or \"see\" what happened during a traced boot — process spans, write/read interleavings, snapshot states, D-group invariant decisions. Triggers: \"show me the trace\", \"visualize the boot\", \"timeline of the trace\", \"render the trace\", or when investigating a `~/.vade/traces/<run-id>/` directory and a chart beats raw text. Default: uploads the parsed trace to the VADE Console and prints `console.vade-app.dev/trace/?run-id=<id>`. Legacy mode (user asks for an offline file, or Console is unreachable): writes a self-contained HTML via `SendUserFile`. Reads `xtrace.log` + `snapshots/*/content/settings.json` + `meta.json`; read-only. Don't invoke for: running a fresh trace (use `bootstrap-trace-init.sh`) or proposing boot-pipeline fixes (audit pause forbids it)."
+description: "Render an interactive timeline from a bootstrap-trace run. Use when the user wants to view, visualize, or \"see\" what happened during a traced boot — process spans, write/read interleavings, snapshot states, D-group invariant decisions. Triggers: \"show me the trace\", \"visualize the boot\", \"timeline of the trace\", \"render the trace\", or when investigating a `~/.vade/traces/<run-id>/` directory and a chart beats raw text. Default: uploads the parsed trace to the VADE Console and prints `console.vade-app.dev/trace/?run-id=<id>`. Legacy mode (user asks for an offline file, or Console is unreachable): writes a self-contained HTML via `SendUserFile`. Reads `xtrace.log` + `snapshots/*/content/settings.json` + `snapshots/*/metadata/{env.txt,processes.txt}` + `meta.json`; read-only. Don't invoke for: running a fresh trace (use `bootstrap-trace-init.sh`) or proposing boot-pipeline fixes (audit pause forbids it)."
 allowed-tools: Bash, Read, SendUserFile
 metadata:
   type: procedural
@@ -96,6 +96,15 @@ The renderer (invoked by both paths):
   chain + tracked children) per PID. Prefers `ps`-side identity over
   xtrace identity when walking the ancestor chain (handles PID reuse
   cleanly).
+- Reads `snapshots/*/metadata/env.txt` for `CLAUDE_SESSION_ID` and
+  attributes each tracked PID's events with the matching session_id
+  (primary: snapshot subprocess PPID == bash PID; fallback: nearest
+  snapshot by time + script name). Emits the value as `session_id` on
+  each affected event; the Console renders it as a `/logs/<session_id>`
+  link (coo-labs/coo-console#46). Cloud-setup build-time PIDs have no
+  session yet and stay un-attributed by design — the field is omitted
+  from events whose env didn't carry a session id, so legacy traces and
+  no-session-context events render unchanged.
 - Captures these event kinds (one marker each on the timeline):
     - `_write_claude_settings_*` — file writes (orange)
     - `merge_coo_settings_*` — wrapper merge calls (blue)

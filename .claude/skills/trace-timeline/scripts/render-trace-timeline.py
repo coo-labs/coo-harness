@@ -168,6 +168,15 @@ with open(xtrace_path) as f:
 
 # Parse snapshots
 SNAPSHOTS = []
+# Coordinated additive contract with coo-labs/coo-console#46 / PR #50:
+# events optionally carry a Claude Code session_id, which the Console
+# renders as a /logs/<session_id> link. CLAUDE_SESSION_ID is the canonical
+# env var (set by Claude Code in hook processes); CLAUDE_CODE_SESSION_ID
+# is a legacy fallback some older surfaces emit. Per-PID attribution is
+# done below from snapshots' env.txt; never invented or guessed.
+SESSION_ID_LINE_RE = re.compile(
+    r"^CLAUDE(?:_CODE)?_SESSION_ID=([A-Za-z0-9._-]{8,128})\s*$"
+)
 snapshots_dir = os.path.join(TRACE_DIR, "snapshots")
 if os.path.isdir(snapshots_dir):
     snap_re = re.compile(
@@ -198,8 +207,34 @@ if os.path.isdir(snapshots_dir):
         except Exception:
             pass
 
+        # CLAUDE_SESSION_ID lives in the snapshot's metadata/env.txt — the
+        # `env | sort` dump captured at this bash invocation's entry. Strip
+        # rule in bootstrap-trace-snapshot.sh excludes TOKEN/API_KEY/SECRET/
+        # PASSWORD/PAT/CLOUDFLARE_API but not session ids. Absent during
+        # container build-time bash invocations (no session yet); present
+        # for session-start hook processes.
+        snap_sid = None
+        try:
+            with open(os.path.join(snapshots_dir, d, "metadata", "env.txt")) as ef:
+                for ln in ef:
+                    sm = SESSION_ID_LINE_RE.match(ln)
+                    if sm:
+                        snap_sid = sm.group(1)
+                        break
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+
         SNAPSHOTS.append(
-            {"ts": ts, "script": m["script"], "pid": int(m["pid"]), "env": env_state, "dir": d}
+            {
+                "ts": ts,
+                "script": m["script"],
+                "pid": int(m["pid"]),
+                "env": env_state,
+                "dir": d,
+                "session_id": snap_sid,
+            }
         )
 
 # strip sentinel keys we used internally
@@ -289,6 +324,57 @@ def to_ms(ts):
     return (ts - boot_start) * 1000
 
 
+# ── Per-PID session_id attribution ────────────────────────────────────
+# Snapshots record CLAUDE_SESSION_ID at bash invocation entry. For each
+# tracked bash PID we want the session_id that was in its env when it
+# was running. Two signals, primary then fallback:
+#
+#   1. Process-tree match. The snapshot subprocess (whose pid is in the
+#      snapshot dir name) is spawned by bootstrap-trace-init.sh inside
+#      the bash being entered, so its PPID is the bash PID. PID_ALL_PPID
+#      (built from processes.txt across snapshots) gives that linkage.
+#      When (1) hits, the snapshot's env *is* the bash's env at entry.
+#
+#   2. Time + script match. When (1) misses (snapshot subprocess never
+#      caught by any later processes.txt; race), fall back to snapshots
+#      whose tag-script matches PID_SCRIPT[p] and whose ts lies inside
+#      [first_ms - 1s, last_ms + 1s] for that PID. Closest-by-time wins.
+#
+# Conservative on uncertainty: a PID with no matching snapshot session_id
+# stays un-attributed (the field is omitted from its events), satisfying
+# the backward-compat clause of the issue.
+PID_SESSION_ID = {}  # tracked pid -> session_id (str)
+_TIME_TOL_SEC = 1.0
+for p in PIDS:
+    # Primary: snapshot subprocess whose PPID == p, with a session_id.
+    primary = [
+        s for s in SNAPSHOTS
+        if s.get("session_id") and PID_ALL_PPID.get(s["pid"]) == p
+    ]
+    if primary:
+        # Most recent wins (latest snapshot env is the most current
+        # attribution; PID_ALL_PPID is first-seen-wins for the snapshot
+        # pid, so each candidate here is a distinct snapshot subprocess).
+        best = max(primary, key=lambda s: s["ts"])
+        PID_SESSION_ID[p] = best["session_id"]
+        continue
+    # Fallback: time + script match. Tag-script in the snapshot dir name
+    # is the bash invocation's $0##*/ value, same domain as PID_SCRIPT[p].
+    script = PID_SCRIPT.get(p)
+    first = PID_FIRST[p]
+    last = PID_LAST[p]
+    nearby = [
+        s for s in SNAPSHOTS
+        if s.get("session_id")
+        and s["script"] == script
+        and first - _TIME_TOL_SEC <= s["ts"] <= last + _TIME_TOL_SEC
+    ]
+    if not nearby:
+        continue
+    best = min(nearby, key=lambda s: abs(s["ts"] - first))
+    PID_SESSION_ID[p] = best["session_id"]
+
+
 data = {
     "meta": meta,
     "boot_start_epoch": boot_start,
@@ -335,6 +421,16 @@ data = {
             "fn": e["fn"],
             "cmd": e["cmd"],
             "detail": e.get("detail", ""),
+            # Additive per coo-labs/coo-console#46. Field is omitted when
+            # the PID's bash invocation had no resolvable CLAUDE_SESSION_ID
+            # in its env at entry-time. Console renders this as a link to
+            # /logs/<session_id> when present and falls back to no link
+            # when absent (backward-compatible).
+            **(
+                {"session_id": PID_SESSION_ID[e["pid"]]}
+                if e["pid"] in PID_SESSION_ID
+                else {}
+            ),
         }
         for e in EVENTS
     ],
@@ -350,9 +446,14 @@ data = {
     ],
 }
 
+_events_with_sid = sum(1 for e in data["events"] if "session_id" in e)
+_unique_sids = len({s["session_id"] for s in SNAPSHOTS if s.get("session_id")})
 print(
     f"PIDs={len(PIDS)}  events={len(EVENTS)}  snapshots={len(SNAPSHOTS)}  "
-    f"duration={data['duration_ms']:.0f}ms",
+    f"duration={data['duration_ms']:.0f}ms  "
+    f"session_id: pids_attributed={len(PID_SESSION_ID)}/{len(PIDS)}  "
+    f"events_with_session_id={_events_with_sid}/{len(EVENTS)}  "
+    f"unique={_unique_sids}",
     file=sys.stderr,
 )
 
