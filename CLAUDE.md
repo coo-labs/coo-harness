@@ -133,6 +133,16 @@ same `OP_SERVICE_ACCOUNT_TOKEN` quota, so neither alone is sufficient.
 Origin: briefing-040 (`coo-memory/briefings/040-op-request-volume.md`)
 and its followup plan §4 (`briefings/_followups/040-op-request-volume-plan-2026-06-07-mrcc.md`).
 
+## Transcript primitives — `lib/transcripts/`
+
+Internal Python library — R2 access, Pydantic v2 `Sidecar` schemas, JSONL
+parsing, provenance invariants. **For any transcript-shape work** (JSONL
+walks, R2 sidecar reads/writes, redaction, new sidecar shapes) start with
+[`lib/transcripts/README.md`](lib/transcripts/README.md) and import from
+`transcripts.*`; the older `scripts/lib/transcript-*.py` files are
+pre-consolidation orchestrators kept for backward-compat. CI:
+`.github/workflows/lib-transcripts.yml`.
+
 ## Bootstrap CI
 
 PRs that touch `scripts/`, `.claude/`, `.mcp.json`, or
