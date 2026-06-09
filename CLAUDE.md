@@ -135,31 +135,13 @@ and its followup plan §4 (`briefings/_followups/040-op-request-volume-plan-2026
 
 ## Transcript primitives — `lib/transcripts/`
 
-`lib/transcripts/` is the internal Python library for the VADE transcript
-pipeline — R2 access, schema types (Pydantic v2 `Sidecar`), JSONL parsing,
-provenance invariants, sidecar I/O. Imported by `scripts/lib/transcript-*.py`
-and `scripts/lifecycle/session-end-transcript-*.py`; consolidated out of the
-earlier copy-pasted version of those primitives.
-
-**When you touch transcripts** — JSONL walks, R2 sidecar reads/writes,
-redaction, schema validation, session-end exports, or any new sidecar
-shape (`*.cost.json`, future cost dashboard etc.) — **start with
-[`lib/transcripts/README.md`](lib/transcripts/README.md)** and import from
-`transcripts.*` rather than re-implementing in `scripts/`. The package is
-the consolidation layer; the older `scripts/lib/transcript-*.py` files are
-pre-consolidation orchestrators kept for backward-compat.
-
-Import pattern (per the README's `parents[N]` table for the script's depth):
-
-```python
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "lib"))  # scripts/lifecycle/
-from transcripts import Sidecar, read_entries, r2_client
-```
-
-CI for the package runs ruff + mypy + pytest on every PR that touches
-`lib/transcripts/` (`.github/workflows/lib-transcripts.yml`).
+Internal Python library — R2 access, Pydantic v2 `Sidecar` schemas, JSONL
+parsing, provenance invariants. **For any transcript-shape work** (JSONL
+walks, R2 sidecar reads/writes, redaction, new sidecar shapes) start with
+[`lib/transcripts/README.md`](lib/transcripts/README.md) and import from
+`transcripts.*`; the older `scripts/lib/transcript-*.py` files are
+pre-consolidation orchestrators kept for backward-compat. CI:
+`.github/workflows/lib-transcripts.yml`.
 
 ## Bootstrap CI
 
